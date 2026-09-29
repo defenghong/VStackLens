@@ -1,0 +1,8 @@
+# Keep this file empty until a mapping has been confirmed in a real environment.
+# aliases:
+#   - collected_model: "CONFIRMED-PART-NUMBER"
+#     hcl_model: "Confirmed HCL model"
+#     source: "vsan_hcl"
+#     category: "ssd"
+#     note: "Evidence and approval reference"
+aliases: []

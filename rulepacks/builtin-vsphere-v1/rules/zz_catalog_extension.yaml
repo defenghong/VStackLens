@@ -1,0 +1,1207 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-CL-007
+  rule_name: Cluster EVC 未启用或配置不一致
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P4
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: &id001
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - evc_enabled
+    object_path: inventory.cluster
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: evc_enabled == False
+    pass_when: evc_enabled == True
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: evc_enabled
+    expected_value: true
+    required_fields: &id002
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    false_positive_notes_zh: 同代际 CPU 主机组成的稳定集群，短期内不扩容、不混用 CPU 代际时，EVC 未启用通常属于中低优先级优化项。
+    exception_guidance_zh: 确认集群主机 CPU 代际一致、近期无跨代扩容计划，并记录硬件生命周期和复核周期。
+    when_to_ignore_zh: 同型号主机集群、无新增主机计划、业务不依赖跨代 vMotion 时可阶段性忽略。
+    title_zh: Cluster EVC 未启用或配置不一致
+    check_name_zh: 集群 EVC 配置
+    finding_title_zh: 集群 EVC 未启用或配置不一致
+    plain_summary_zh: 检查 集群 EVC 配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 EVC 未启用或配置不一致。
+    summary_zh: 集群 EVC 未启用或 EVC 模式配置不一致，可能影响不同代际 CPU 主机之间的虚拟机迁移兼容性。
+    business_impact_zh: 后续新增主机、硬件替换或跨主机迁移时，可能出现虚拟机无法 vMotion 的情况，影响维护窗口内的迁移效率。
+    technical_impact_zh: EVC 用于统一集群内 CPU 暴露特性；未启用或模式不一致时，虚拟机可能绑定更高 CPU 指令集，限制迁移目标主机。
+    consequence_zh: 可能导致维护时无法迁移虚拟机，增加停机风险，并限制集群扩容和硬件更新灵活性。
+    remediation_zh: 评估集群内 CPU 代际和业务兼容性后，规划启用或统一 EVC 模式，并在维护窗口内验证 vMotion。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 统计集群内主机 CPU 型号和当前 EVC 模式。
+    - 评估现有虚拟机兼容性和目标 EVC 基线。
+    - 在维护窗口内统一 EVC 配置。
+    - 选择测试虚拟机执行 vMotion 验证，并复跑巡检规则。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: cluster
+    tags:
+    - cluster
+    - catalog
+  scoring:
+    dimension: cluster
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-CL-009
+  rule_name: HA 隔离响应策略是否配置合理
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - ha_isolation_response
+    object_path: inventory.cluster
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: ha_isolation_response in ['powerOff', 'shutdown']
+    pass_when: ha_isolation_response in ['none', 'leavePoweredOn']
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: ha_isolation_response
+    expected_value: none / leavePoweredOn
+    required_fields: *id002
+  report_fields:
+    title_zh: HA 隔离响应策略是否配置合理
+    check_name_zh: 集群 HA 隔离响应策略
+    finding_title_zh: 集群 HA 隔离响应策略存在风险
+    plain_summary_zh: 检查 集群 HA 隔离响应策略，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 HA 隔离响应策略存在风险。
+    summary_zh: 检查集群 HA 隔离响应策略，识别是否配置为自动关闭或关机虚拟机。
+    business_impact_zh: 隔离响应策略过于激进时，网络隔离场景可能导致虚拟机被非预期关闭，影响业务连续性。
+    technical_impact_zh: HA isolationResponse 为 powerOff 或 shutdown 时，主机隔离判断触发后会对虚拟机执行电源动作，需结合客户可用性策略确认。
+    consequence_zh: 可能在网络隔离、管理网络异常或误判场景下造成业务中断，增加故障恢复复杂度。
+    remediation_zh: 核对 HA 隔离响应策略与业务连续性要求，优先采用保守策略，并在变更后复跑巡检验证。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 查看集群 HA 配置中的虚拟机隔离响应策略。
+    - 与业务负责人确认隔离场景下是否允许自动关机或关闭虚拟机电源。
+    - 将策略调整为 none 或 leavePoweredOn 等保守配置。
+    - 保存配置后复跑巡检，确认 ha_isolation_response 不再命中风险。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: cluster
+    tags:
+    - cluster
+    - catalog
+  scoring:
+    dimension: cluster
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-CL-013
+  rule_name: Cluster 存在未退出维护模式的主机
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - maintenance_host_count
+    object_path: inventory.cluster
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: maintenance_host_count > 0
+    pass_when: maintenance_host_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: maintenance_host_count
+    expected_value: 0
+    required_fields: *id002
+  report_fields:
+    title_zh: Cluster 存在未退出维护模式的主机
+    check_name_zh: 集群主机维护模式状态
+    finding_title_zh: 集群内存在未退出维护模式的主机
+    plain_summary_zh: 检查 集群主机维护模式状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群内存在未退出维护模式的主机。
+    summary_zh: 集群内存在仍处于维护模式的主机，可能导致可用计算资源减少。
+    business_impact_zh: 如果维护完成后主机未退出维护模式，业务资源池容量下降，可能影响虚拟机调度和故障恢复余量。
+    technical_impact_zh: 维护模式主机不会承载普通虚拟机负载，DRS 和 HA 可用资源都会受到影响。
+    consequence_zh: 长期未退出维护模式可能造成资源浪费、集群负载不均或 HA 接管能力下降。
+    remediation_zh: 确认维护任务是否完成，完成后将主机退出维护模式，并观察集群负载和 HA 状态。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 确认主机进入维护模式的原因。
+    - 检查主机补丁、硬件或网络维护是否完成。
+    - 将主机退出维护模式。
+    - 复核主机连接状态、DRS 状态和虚拟机分布，并复跑巡检规则。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: cluster
+    tags:
+    - cluster
+    - catalog
+  scoring:
+    dimension: cluster
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-CL-016
+  rule_name: vMotion 网络是否全部主机可用
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - host_count
+    - vmotion_enabled_host_count
+    - cluster_vmotion_missing_host_count
+    object_path: inventory.cluster
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: vmotion_enabled_host_count < host_count
+    pass_when: vmotion_enabled_host_count >= host_count
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: cluster_vmotion_missing_host_count
+    expected_value: 0
+    required_fields: *id002
+  report_fields:
+    false_positive_notes_zh: 部分小型集群或专用集群可能有意不启用 vMotion；如果该集群不承载在线迁移、DRS 或无停机维护诉求，可作为例外处理。
+    exception_guidance_zh: 确认业务负责人接受停机维护或手动迁移策略后，记录例外原因、负责人和到期复核时间。
+    when_to_ignore_zh: 专用隔离集群、测试集群、边缘节点或客户明确禁止 vMotion 的场景可忽略。
+    title_zh: vMotion 网络是否全部主机可用
+    check_name_zh: 集群 vMotion 网络覆盖
+    finding_title_zh: 集群 vMotion 网络覆盖不完整
+    plain_summary_zh: 检查 集群 vMotion 网络覆盖，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 vMotion 网络覆盖不完整。
+    summary_zh: 检查集群内所有主机是否都配置可用的 vMotion VMkernel 网络。
+    business_impact_zh: 集群内部分主机缺少 vMotion 网络会限制在线迁移能力，影响维护效率和负载调整能力。
+    technical_impact_zh: vMotion 依赖启用 vMotion 服务的 VMkernel 网卡；缺失主机会导致跨主机迁移路径不完整。
+    consequence_zh: 主机维护可能需要停机迁移，DRS 调度受限，故障或容量调整时可操作空间降低。
+    remediation_zh: 为缺少 vMotion 的主机补齐 VMkernel 网络配置，并验证跨主机 vMotion 连通性。
+  remediation:
+    owner_role: network_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 识别 cluster_vmotion_missing_host_count 大于 0 的集群。
+    - 查看集群内未启用 vMotion VMkernel 的主机。
+    - 为相关主机创建或启用 vMotion VMkernel 网络，并核对 VLAN、MTU 和网关。
+    - 执行测试迁移或复跑巡检，确认所有主机均具备 vMotion 网络。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: cluster
+    tags:
+    - cluster
+    - catalog
+  scoring:
+    dimension: cluster
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-HOST-016
+  rule_name: ESXi Shell 服务已开启
+  category: host
+  object_type: HostSystem
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - esxi_shell_running
+    object_path: inventory.host
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: esxi_shell_running == True
+    pass_when: esxi_shell_running == False
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: esxi_shell_running
+    expected_value: false
+    required_fields: *id002
+  report_fields:
+    title_zh: ESXi Shell 服务已开启
+    check_name_zh: ESXi Shell 服务状态
+    finding_title_zh: ESXi Shell 服务已开启
+    plain_summary_zh: 检查 ESXi Shell 服务状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi Shell 服务已开启。
+    summary_zh: ESXi Shell 处于开启状态，增加主机直接登录和非标准变更风险。
+    business_impact_zh: 长期开启 Shell 会扩大主机攻击面，增加安全审计和合规压力。
+    technical_impact_zh: ESXi Shell 允许直接在主机侧执行命令，可能绕过 vCenter 统一操作入口和审计流程。
+    consequence_zh: 可能引发未授权操作、误操作、配置漂移或安全审计缺失。
+    remediation_zh: 非维护期间关闭 ESXi Shell，并将启动策略调整为手动或按需启用。
+  remediation:
+    owner_role: security_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 确认当前是否存在正在进行的主机维护任务。
+    - 在维护结束后关闭 ESXi Shell 服务。
+    - 将 ESXi Shell 启动策略设置为手动。
+    - 复跑巡检规则确认服务状态。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: host
+    tags:
+    - host
+    - catalog
+  scoring:
+    dimension: security
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-HOST-019
+  rule_name: 主机物理网卡链路降速或断链
+  category: host
+  object_type: HostSystem
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - physical_nic_link_issue_count
+    object_path: inventory.host
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: physical_nic_link_issue_count > 0
+    pass_when: physical_nic_link_issue_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: physical_nic_link_issue_count
+    expected_value: 0
+    required_fields: *id002
+  report_fields:
+    title_zh: 主机物理网卡链路降速或断链
+    check_name_zh: ESXi 主机物理网卡状态
+    finding_title_zh: ESXi 主机物理网卡链路异常
+    plain_summary_zh: 检查 ESXi 主机物理网卡状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机物理网卡链路异常。
+    summary_zh: 主机物理网卡存在断链或降速，可能影响管理、业务、vMotion 或存储网络可用性。
+    business_impact_zh: 链路异常可能导致虚拟机网络抖动、迁移失败、存储访问性能下降或冗余能力降低。
+    technical_impact_zh: 物理网卡 linkDown 或链路速率低于预期时，上层 vSwitch、PortGroup、VMkernel 网络和存储网络都可能受影响。
+    consequence_zh: 可能导致网络单点、业务性能下降、vMotion 失败或存储访问异常。
+    remediation_zh: 检查物理交换机端口、网线、光模块、网卡驱动固件和链路协商配置，恢复链路冗余和速率。
+  remediation:
+    owner_role: network_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 定位异常 vmnic 和对应物理交换机端口。
+    - 检查网线、光模块、交换机端口状态和速率协商。
+    - 核对 ESXi 网卡驱动和固件版本。
+    - 修复后确认链路状态和速率恢复正常，并复跑巡检规则。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: host
+    tags:
+    - host
+    - catalog
+  scoring:
+    dimension: network
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-HOST-020
+  rule_name: 主机 HBA 或存储路径异常
+  category: host
+  object_type: HostSystem
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - storage_path_dead_count
+    object_path: inventory.host
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: storage_path_dead_count > 0
+    pass_when: storage_path_dead_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: storage_path_dead_count
+    expected_value: 0
+    required_fields: *id002
+  report_fields:
+    title_zh: 主机 HBA 或存储路径异常
+    check_name_zh: ESXi 主机存储路径状态
+    finding_title_zh: ESXi 主机存在异常存储路径
+    plain_summary_zh: 检查 ESXi 主机存储路径状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机存在异常存储路径。
+    summary_zh: 主机存在异常存储路径，可能影响 SAN、NVMe 或 iSCSI 存储访问可靠性。
+    business_impact_zh: 存储路径异常会降低冗余能力，严重时可能导致虚拟机 I/O 延迟升高或数据存储不可访问。
+    technical_impact_zh: HBA 或存储路径进入 dead、lost、inactive 等异常状态时，多路径冗余和负载均衡能力下降。
+    consequence_zh: 可能导致存储单路径运行、I/O 错误、性能下降或故障时业务中断。
+    remediation_zh: 检查 HBA、交换机分区、存储端口、链路和多路径策略，恢复异常路径。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 查看异常路径对应的 HBA、LUN 和存储端口。
+    - 检查光纤交换机 zoning 或 iSCSI/NVMe 网络连通性。
+    - 检查存储阵列端口和主机多路径策略。
+    - 修复后重新扫描存储并复核路径状态。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: host
+    tags:
+    - host
+    - catalog
+  scoring:
+    dimension: storage
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-NET-004
+  rule_name: VMkernel 网卡 MTU 不一致
+  category: network
+  object_type: HostSystem
+  risk_level: P4
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - vmkernel_mtu_values
+    object_path: inventory.network
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: count_distinct(vmkernel_mtu_values) > 1
+    pass_when: count_distinct(vmkernel_mtu_values) <= 1
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: vmkernel_mtu_values
+    expected_value: single MTU value
+    required_fields: *id002
+  report_fields:
+    false_positive_notes_zh: 不同用途 VMkernel 网卡允许使用不同 MTU，例如管理网络 1500、vMotion 或存储网络 9000。
+    exception_guidance_zh: 确认 MTU 差异符合网络分区设计，并记录对应业务网络、交换机端到端 MTU 和负责人。
+    when_to_ignore_zh: 不同服务网络按设计采用不同 MTU，且端到端连通性验证通过时可忽略。
+    title_zh: VMkernel 网卡 MTU 不一致
+    check_name_zh: VMkernel MTU 配置
+    finding_title_zh: VMkernel MTU 配置不一致
+    plain_summary_zh: 检查 VMkernel MTU 配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现VMkernel MTU 配置不一致。
+    summary_zh: 主机 VMkernel 网卡 MTU 配置不一致，可能影响 vMotion、iSCSI、NFS 或 vSAN 等网络流量。
+    business_impact_zh: MTU 不一致可能导致迁移失败、存储网络异常或性能不稳定。
+    technical_impact_zh: 端到端 Jumbo Frame 场景要求 VMkernel、虚拟交换机和物理交换机 MTU 一致，否则可能出现分片或丢包。
+    consequence_zh: 可能导致 vMotion 中断、存储访问延迟、网络丢包或性能下降。
+    remediation_zh: 统一相关 VMkernel、vSwitch/vDS 和物理交换机端口 MTU 配置，并进行连通性验证。
+  remediation:
+    owner_role: network_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: command_check
+    steps_zh:
+    - 识别 MTU 不一致的 VMkernel 网卡。
+    - 核对对应 vSwitch/vDS 和物理交换机端口 MTU。
+    - 按业务网络规划统一 MTU。
+    - 使用 vmkping 或迁移测试验证端到端连通性，并复跑巡检规则。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: network
+    tags:
+    - network
+    - catalog
+  scoring:
+    dimension: network
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-010
+  rule_name: VM CPU 或内存预留过高
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - vm_reservation_too_high
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: vm_reservation_too_high == True
+    pass_when: vm_reservation_too_high == False
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: vm_reservation_too_high
+    expected_value: false
+    required_fields: *id002
+  report_fields:
+    title_zh: VM CPU 或内存预留过高
+    check_name_zh: 虚拟机资源预留配置
+    finding_title_zh: 虚拟机 CPU 或内存预留过高
+    plain_summary_zh: 检查 虚拟机资源预留配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机 CPU 或内存预留过高。
+    summary_zh: 虚拟机配置了较高 CPU 或内存预留，可能占用集群可调度资源。
+    business_impact_zh: 过高预留会降低资源池弹性，影响其他虚拟机调度和集群容量利用率。
+    technical_impact_zh: Reservation 会保证资源分配，但过度配置会减少可分配资源并影响 DRS 调度。
+    consequence_zh: 可能导致集群资源碎片化、虚拟机启动失败或容量规划偏差。
+    remediation_zh: 结合业务 SLA 评估预留必要性，降低不合理预留或改用资源池策略。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: manual_check
+    steps_zh:
+    - 识别配置高预留的虚拟机。
+    - 与业务方确认性能保障需求。
+    - 调整 CPU 或内存预留值。
+    - 观察业务性能和集群可用资源变化，并复跑巡检规则。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-011
+  rule_name: VM 配置资源限制 Limit
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - vm_resource_limit_present
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: vm_resource_limit_present == True
+    pass_when: vm_resource_limit_present == False
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: vm_resource_limit_present
+    expected_value: false
+    required_fields: *id002
+  report_fields:
+    title_zh: VM 配置资源限制 Limit
+    check_name_zh: 虚拟机资源限制配置
+    finding_title_zh: 虚拟机配置了资源 Limit
+    plain_summary_zh: 检查 虚拟机资源限制配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机配置了资源 Limit。
+    summary_zh: 虚拟机配置了 CPU 或内存 Limit，可能限制其在高负载时获得必要资源。
+    business_impact_zh: 资源限制可能导致业务高峰期性能下降，即使集群仍有空闲资源。
+    technical_impact_zh: Limit 会限制虚拟机可使用的最大资源，容易造成 CPU Ready、内存回收或性能瓶颈。
+    consequence_zh: 可能出现应用响应慢、批处理延迟或性能问题难以定位。
+    remediation_zh: 除明确限速场景外，建议移除不必要的 CPU/内存 Limit，并持续观察性能。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: manual_check
+    steps_zh:
+    - 检查虚拟机 CPU 和内存 Limit 配置。
+    - 确认是否为业务限速或测试需求。
+    - 移除或调整不合理 Limit。
+    - 复核虚拟机性能指标和业务反馈，并复跑巡检规则。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-012
+  rule_name: VM vCPU 数量过多
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P4
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - vcpu_count
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters:
+    max_vcpu_count:
+      type: number
+      default: 8
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: vcpu_count > max_vcpu_count
+    pass_when: vcpu_count <= max_vcpu_count
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: vcpu_count
+    expected_value: <= 8
+    required_fields: *id002
+  report_fields:
+    false_positive_notes_zh: 大型数据库、中间件或高并发业务可能需要较高 vCPU；仅凭 vCPU 数量不能直接认定性能问题。
+    exception_guidance_zh: 结合 CPU 使用率、CPU Ready、业务压测或容量评估结果确认配置合理性，并记录应用负责人确认。
+    when_to_ignore_zh: 业务压测证明需要大规格 vCPU，且 CPU Ready 长期正常时可忽略。
+    title_zh: VM vCPU 数量过多
+    check_name_zh: 虚拟机 vCPU 配置
+    finding_title_zh: 虚拟机 vCPU 数量过多
+    plain_summary_zh: 检查 虚拟机 vCPU 配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机 vCPU 数量过多。
+    summary_zh: 虚拟机 vCPU 数量较多，可能增加调度开销并引发 CPU Ready 风险。
+    business_impact_zh: 过多 vCPU 不一定提升性能，反而可能导致应用响应变慢和资源浪费。
+    technical_impact_zh: ESXi 需要为多 vCPU 虚拟机调度足够的 CPU 时间片，vCPU 过多会增加调度等待。
+    consequence_zh: 可能导致 CPU Ready 升高、集群资源利用率下降和性能调优困难。
+    remediation_zh: 结合实际 CPU 使用率和业务需求，逐步下调过量 vCPU 配置并观察性能。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 识别 vCPU 数量较高的虚拟机。
+    - 查看 CPU 使用率、CPU Ready 和业务负载。
+    - 与业务方确认资源需求。
+    - 在维护窗口内调整 vCPU 并持续观察性能。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-015
+  rule_name: VM 虚拟硬件版本过旧
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P4
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - hardware_version_number
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters:
+    min_hardware_version:
+      type: number
+      default: 15
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: hardware_version_number < min_hardware_version
+    pass_when: hardware_version_number >= min_hardware_version
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: hardware_version_number
+    expected_value: '>= 15'
+    required_fields: *id002
+  report_fields:
+    false_positive_notes_zh: 老旧操作系统或厂商应用可能不支持升级虚拟硬件版本；该项通常属于兼容性优化提示。
+    exception_guidance_zh: 确认操作系统、应用厂商和备份系统兼容性；如暂不升级，记录业务负责人和下次升级评估时间。
+    when_to_ignore_zh: 老旧系统、厂商锁定版本或升级风险高于收益时可阶段性忽略。
+    title_zh: VM 虚拟硬件版本过旧
+    check_name_zh: 虚拟机硬件版本
+    finding_title_zh: 虚拟机硬件版本过旧
+    plain_summary_zh: 检查 虚拟机硬件版本，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机硬件版本过旧。
+    summary_zh: 虚拟机硬件版本较旧，可能限制新版 vSphere 的功能和兼容能力。
+    business_impact_zh: 旧硬件版本可能影响后续升级、性能特性、安全能力或设备兼容。
+    technical_impact_zh: 虚拟硬件版本决定虚拟设备能力和平台特性，过旧版本无法使用部分新功能。
+    consequence_zh: 可能导致功能受限、兼容性风险增加或升级改造成本上升。
+    remediation_zh: 在确认操作系统和业务兼容后，规划升级虚拟硬件版本。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 识别硬件版本较旧的虚拟机。
+    - 核对客户机操作系统和 VMware Tools 状态。
+    - 在维护窗口内先做快照或备份。
+    - 升级虚拟硬件版本并验证业务。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-016
+  rule_name: VM 是否连接到不存在/异常网络
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - invalid_network_count
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: invalid_network_count > 0
+    pass_when: invalid_network_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: invalid_network_count
+    expected_value: 0
+    required_fields: *id002
+  report_fields:
+    title_zh: VM 是否连接到不存在/异常网络
+    check_name_zh: 虚拟机网络连接状态
+    finding_title_zh: 虚拟机连接到不存在或异常网络
+    plain_summary_zh: 检查 虚拟机网络连接状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机连接到不存在或异常网络。
+    summary_zh: 检查虚拟机网卡是否连接到不存在或不可解析的网络后端。
+    business_impact_zh: 虚拟机连接异常网络可能导致业务网络中断、迁移失败或故障恢复后无法正常访问。
+    technical_impact_zh: 虚拟网卡 backing 缺少有效 network 引用时，说明端口组或分布式端口后端可能已删除、不可访问或配置异常。
+    consequence_zh: 可能造成虚拟机网络不可用、业务访问失败，或在迁移、克隆、恢复过程中出现网络绑定错误。
+    remediation_zh: 将虚拟机网卡重新连接到有效端口组或分布式端口组，并确认网络连通性。
+  remediation:
+    owner_role: network_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 查看命中虚拟机的网卡连接状态和网络 backing。
+    - 确认原端口组或分布式端口组是否已删除、重命名或不可访问。
+    - 将虚拟机网卡连接到正确的业务网络。
+    - 验证虚拟机网络连通性，并复跑巡检确认 invalid_network_count 为 0。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-017
+  rule_name: VM 是否存在孤立状态 orphaned/inaccessible
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - orphaned_or_inaccessible
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: orphaned_or_inaccessible == True
+    pass_when: orphaned_or_inaccessible == False
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: orphaned_or_inaccessible
+    expected_value: false
+    required_fields: *id002
+  report_fields:
+    title_zh: VM 是否存在孤立状态 orphaned/inaccessible
+    check_name_zh: 虚拟机清单状态
+    finding_title_zh: 虚拟机处于 orphaned 或 inaccessible 状态
+    plain_summary_zh: 检查 虚拟机清单状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机处于 orphaned 或 inaccessible 状态。
+    summary_zh: 检查虚拟机是否处于 orphaned、inaccessible 或 invalid 等异常连接状态。
+    business_impact_zh: 孤立或不可访问虚拟机通常意味着 vCenter 无法可靠管理该对象，可能影响业务恢复和运维操作。
+    technical_impact_zh: VM runtime connectionState 异常时，虚拟机注册关系、存储访问或清单对象状态可能存在问题。
+    consequence_zh: 可能导致虚拟机无法开关机、无法迁移、无法备份或无法准确纳入资产统计。
+    remediation_zh: 核查虚拟机所在主机、数据存储和注册状态，按实际原因重新注册、恢复存储访问或清理无效对象。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 查看虚拟机 runtime connectionState 和所在主机状态。
+    - 核对虚拟机文件所在数据存储是否可访问。
+    - 根据原因重新注册虚拟机、恢复存储访问或清理无效清单对象。
+    - 复跑巡检，确认 orphaned_or_inaccessible 为 false。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-021
+  rule_name: VM 是否挂载宿主机设备/直通设备
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P4
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - passthrough_device_count
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: passthrough_device_count > 0
+    pass_when: passthrough_device_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: passthrough_device_count
+    expected_value: 0
+    required_fields: *id002
+  report_fields:
+    false_positive_notes_zh: GPU、USB Key、专用 PCI 卡等直通设备可能是业务必需配置，不应直接要求移除。
+    exception_guidance_zh: 确认直通设备用途、绑定主机、备份恢复方案和故障切换限制，并由业务负责人批准例外。
+    when_to_ignore_zh: 图形工作站、授权加密狗、专用采集卡或 GPU 计算等明确依赖直通设备的场景可忽略。
+    title_zh: VM 是否挂载宿主机设备/直通设备
+    check_name_zh: 虚拟机直通设备配置
+    finding_title_zh: 虚拟机挂载宿主机或直通设备
+    plain_summary_zh: 检查 虚拟机直通设备配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机挂载宿主机或直通设备。
+    summary_zh: 检查虚拟机是否配置 PCI 直通等宿主机设备依赖。
+    business_impact_zh: 直通设备会让虚拟机依赖特定主机硬件，可能限制 vMotion、HA 接管和标准化运维。
+    technical_impact_zh: VirtualPCIPassthrough 等设备会改变虚拟机迁移和恢复能力，需要在资产和可用性评估中明确标识。
+    consequence_zh: 主机故障或维护时虚拟机可能无法平滑迁移，恢复路径受限，维护窗口和回退复杂度增加。
+    remediation_zh: 评估直通设备的业务必要性；非必要场景建议移除，必要场景需明确主机绑定、备份和恢复方案。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 查看命中虚拟机的硬件设备列表，确认直通设备用途。
+    - 与业务负责人确认该设备依赖是否必须保留。
+    - 非必要时在维护窗口内移除直通设备并验证业务。
+    - 必须保留时记录主机绑定、恢复预案和维护窗口要求。
+    - 复跑巡检确认 passthrough_device_count 符合预期。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-VM-022
+  rule_name: VM 磁盘需要执行 Consolidation
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *id001
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required:
+  - pyvmomi
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - needs_consolidation
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: needs_consolidation == True
+    pass_when: needs_consolidation == False
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: needs_consolidation
+    expected_value: false
+    required_fields: *id002
+  report_fields:
+    title_zh: VM 磁盘需要执行 Consolidation
+    check_name_zh: 虚拟机磁盘合并状态
+    finding_title_zh: 虚拟机需要执行磁盘 Consolidation
+    plain_summary_zh: 检查 虚拟机磁盘合并状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机需要执行磁盘 Consolidation。
+    summary_zh: 虚拟机存在需要 Consolidation 的磁盘状态，说明快照或磁盘链可能存在残留。
+    business_impact_zh: 未及时合并可能持续占用存储空间，并增加后续快照、备份或迁移失败风险。
+    technical_impact_zh: Consolidation needed 通常表示快照删除后仍有 redo log 或磁盘链未完全合并。
+    consequence_zh: 可能导致 Datastore 空间增长、虚拟机性能下降或备份失败。
+    remediation_zh: 确认备份任务和快照状态后，在合适窗口执行磁盘 Consolidation，并监控存储空间。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查虚拟机快照和备份任务状态。
+    - 确认 Datastore 剩余空间充足。
+    - 在合适窗口执行 Consolidate。
+    - 复核虚拟机告警、快照链和备份状态，并复跑巡检规则。
+  references:
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - catalog
+  scoring:
+    dimension: vm
+    weight: 1.0

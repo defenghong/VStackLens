@@ -1,0 +1,252 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-DS-001
+  rule_name: Datastore capacity high
+  category: datastore
+  object_type: Datastore
+  risk_level: P3
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - used_percent
+    object_path: inventory.datastores
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: used_percent >= 80
+    pass_when: used_percent < 80
+  severity_policy:
+    type: threshold
+    default_level: P3
+    rules:
+    - when: used_percent >= 95
+      level: P1
+    - when: used_percent >= 90
+      level: P2
+    - when: used_percent >= 80
+      level: P3
+  evidence_schema:
+    current_value_path: used_percent
+    expected_value: < 80
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 数据存储容量状态
+    finding_title_zh: 数据存储容量使用率过高
+    plain_summary_zh: 检查 数据存储容量状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现数据存储容量使用率过高。
+    title_zh: Datastore 容量使用率过高
+    summary_zh: Datastore 使用率超过容量阈值。
+    business_impact_zh: 虚拟机写入、快照、备份和迁移操作可能受到影响。
+    technical_impact_zh: 剩余空间不足会增加 VMFS/NFS 操作风险。
+    consequence_zh: 可能导致虚拟机暂停、快照合并失败或数据存储耗尽。
+    remediation_zh: 清理无用文件、删除过期快照或扩容 Datastore。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 清理 ISO、模板和无用文件
+    - 删除或合并过期快照
+    - 迁移虚拟机或扩容 Datastore 后复跑巡检
+  references:
+  - title: vSphere storage
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Datastore
+    tags:
+    - capacity
+  scoring:
+    dimension: capacity
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-DS-002
+  rule_name: Datastore inaccessible
+  category: datastore
+  object_type: Datastore
+  risk_level: P1
+  health_impact: critical
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - accessible
+    object_path: inventory.datastores
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: accessible == False
+    pass_when: accessible == True
+  severity_policy:
+    type: fixed
+    default_level: P1
+    rules: []
+  evidence_schema:
+    current_value_path: accessible
+    expected_value: true
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 数据存储可访问性
+    finding_title_zh: 数据存储不可访问
+    plain_summary_zh: 检查 数据存储可访问性，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现数据存储不可访问。
+    title_zh: Datastore 不可访问
+    summary_zh: Datastore 当前处于不可访问状态。
+    business_impact_zh: 虚拟机磁盘访问可能中断，业务可用性受影响。
+    technical_impact_zh: 主机无法访问对应存储路径或挂载关系异常。
+    consequence_zh: 可能导致虚拟机宕机、数据不可用或迁移失败。
+    remediation_zh: 检查存储阵列、存储网络和主机挂载状态。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: high
+    maintenance_window_required: false
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查存储阵列和卷状态
+    - 检查 SAN/NFS 网络与多路径
+    - 检查 ESXi 主机挂载状态并复扫存储
+  references:
+  - title: vSphere storage
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Datastore
+    tags:
+    - availability
+  scoring:
+    dimension: availability
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-DS-006
+  rule_name: Datastore not attached to host
+  category: datastore
+  object_type: Datastore
+  risk_level: P4
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - attached_host_count
+    object_path: inventory.datastores
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: attached_host_count < 1
+    pass_when: attached_host_count >= 1
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: attached_host_count
+    expected_value: '>= 1'
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 数据存储挂载状态
+    finding_title_zh: 数据存储未挂载到任何主机
+    plain_summary_zh: 检查 数据存储挂载状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现数据存储未挂载到任何主机。
+    title_zh: Datastore 未挂载到任何主机
+    summary_zh: 未发现主机挂载该 Datastore。
+    business_impact_zh: 可能存在闲置存储、误配置或遗留对象。
+    technical_impact_zh: Datastore 与主机的挂载关系为空。
+    consequence_zh: 可能造成存储资源浪费或隐藏的挂载故障。
+    remediation_zh: 确认 Datastore 用途，按需挂载主机或移除。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: manual_check
+    steps_zh:
+    - 确认 Datastore 是否仍有业务用途
+    - 按需挂载到目标主机或集群
+    - 无用途时按流程下线并移除
+  references:
+  - title: vSphere storage
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Datastore
+    tags:
+    - inventory
+  scoring:
+    dimension: capacity
+    weight: 0.3
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix

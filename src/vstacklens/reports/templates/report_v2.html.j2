@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>{{ report_info.report_title }}</title>
+  <style>
+    :root {
+      --ink: #111827;
+      --muted: #6b7280;
+      --blue: #0b2545;
+      --line: #d7dde8;
+      --fill: #f3f6fb;
+      --p1: #991b1b;
+      --p2: #b45309;
+      --p3: #1d4ed8;
+      --p4: #475569;
+    }
+    body { margin: 0; color: var(--ink); font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; background: #fff; }
+    .page { max-width: 1160px; margin: 0 auto; padding: 36px 42px 56px; }
+    .cover { border-bottom: 3px solid var(--blue); padding-bottom: 22px; margin-bottom: 28px; }
+    h1 { margin: 0 0 10px; color: var(--blue); font-size: 30px; }
+    h2 { margin: 30px 0 12px; color: var(--blue); font-size: 20px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+    h3 { margin: 20px 0 8px; color: #1f4d78; font-size: 16px; }
+    .meta { color: var(--muted); font-size: 13px; line-height: 1.8; }
+    .cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin: 18px 0 18px; }
+    .card { background: var(--fill); border: 1px solid var(--line); padding: 14px; border-radius: 6px; }
+    .card .label { color: var(--muted); font-size: 12px; }
+    .card .value { margin-top: 6px; font-size: 24px; font-weight: 700; color: var(--blue); }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0 22px; table-layout: fixed; }
+    th, td { border: 1px solid var(--line); padding: 8px 9px; text-align: left; vertical-align: top; font-size: 13px; word-break: break-word; }
+    th { background: #e8eef5; color: #0b2545; }
+    .risk-P1 { color: var(--p1); font-weight: 700; }
+    .risk-P2 { color: var(--p2); font-weight: 700; }
+    .risk-P3 { color: var(--p3); font-weight: 700; }
+    .risk-P4 { color: var(--p4); font-weight: 700; }
+    .note { background: #f8fafc; border-left: 4px solid var(--blue); padding: 10px 12px; margin: 10px 0 18px; }
+    @media print { .page { max-width: none; padding: 24px 28px; } .cards { grid-template-columns: repeat(3, 1fr); } }
+  </style>
+</head>
+<body>
+<main class="page">
+  <section class="cover">
+    <h1>{{ report_info.report_title }}</h1>
+    <div class="meta">
+      客户：{{ customer_info.customer_name }}　|　vCenter：{{ customer_info.vcenter }}<br>
+      项目：{{ customer_info.project_name }}　|　生成时间：{{ report_info.generated_at }}　|　版本：{{ report_info.report_version }}
+    </div>
+  </section>
+
+  <h2>执行摘要</h2>
+  <div class="cards">
+    <div class="card"><div class="label">健康状态</div><div class="value">{{ health_score.label }}</div></div>
+    <div class="card"><div class="label">评估结论</div><div class="value">{{ health_score.grade }}</div></div>
+    <div class="card"><div class="label">资产总数</div><div class="value">{{ environment_summary.checked_object_total }}</div></div>
+    <div class="card"><div class="label">风险总数</div><div class="value">{{ risk_summary.total }}</div></div>
+    <div class="card"><div class="label">优化建议</div><div class="value">{{ risk_summary.P4 }}</div></div>
+    <div class="card"><div class="label">不可判定</div><div class="value">{{ environment_summary.result_status_summary.get('unavailable', 0) }}</div></div>
+    <div class="card"><div class="label">不适用</div><div class="value">{{ environment_summary.result_status_summary.get('not_applicable', 0) }}</div></div>
+  </div>
+  <div class="note">{{ health_score.explanation }}</div>
+
+  <h2>环境概览</h2>
+  <table>
+    <tr><th>资产类型</th><th>数量</th></tr>
+    {% for object_type, count in asset_inventory.summary.items() %}
+    <tr><td>{{ object_type }}</td><td>{{ count }}</td></tr>
+    {% endfor %}
+  </table>
+
+  <h2>风险统计</h2>
+  <table>
+    <tr><th>P1 严重</th><th>P2 高</th><th>P3 中</th><th>优化建议</th></tr>
+    <tr><td class="risk-P1">{{ risk_summary.P1 }}</td><td class="risk-P2">{{ risk_summary.P2 }}</td><td class="risk-P3">{{ risk_summary.P3 }}</td><td class="risk-P4">{{ risk_summary.P4 }}</td></tr>
+  </table>
+
+  <h2>风险详情与证据</h2>
+  <table>
+    <tr><th style="width:70px">等级</th><th>风险名称</th><th>对象</th><th>当前值</th><th>建议状态</th><th>整改建议</th></tr>
+    {% for item in findings %}
+    <tr>
+      <td class="risk-{{ item.risk_level }}">{{ item.risk_level }}</td>
+      <td>{{ item.title }}</td>
+      <td>{{ item.object_name }}</td>
+      <td>{{ item.current_value }}</td>
+      <td>{{ item.expected_value }}</td>
+      <td>{{ item.remediation }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <h2>整改清单</h2>
+  <table>
+    <tr><th>等级</th><th>整改项</th><th>对象数</th><th>责任角色</th><th>工作量</th><th>维护窗口</th><th>验证方式</th></tr>
+    {% for item in remediation_plan %}
+    <tr>
+      <td class="risk-{{ item.risk_level }}">{{ item.risk_level }}</td>
+      <td>{{ item.title }}</td>
+      <td>{{ item.object_count }}</td>
+      <td>{{ item.owner_role }}</td>
+      <td>{{ item.effort }}</td>
+      <td>{{ "是" if item.maintenance_window_required else "否" }}</td>
+      <td>{{ item.verification_method }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <h2>不可判定项</h2>
+  <table>
+    <tr><th>核验类别</th><th>对象</th><th>数据质量</th><th>说明</th></tr>
+    {% for item in appendix.unavailable_rules %}
+    <tr><td>{{ item.title or item.rule_name or "环境核验" }}</td><td>{{ item.object_name }}</td><td>{{ item.data_quality }}</td><td>{{ item.reason }}</td></tr>
+    {% endfor %}
+  </table>
+
+  <h2>附录：评估覆盖清单</h2>
+  <table>
+    <tr><th>覆盖类别</th><th>名称</th><th>失败</th><th>通过</th><th>不适用</th><th>不可判定</th></tr>
+    {% for item in appendix.rule_checklist %}
+    <tr><td>{{ item.category or item.object_type or "环境核验" }}</td><td>{{ item.rule_name or item.title or "核验结果" }}</td><td>{{ item.failed }}</td><td>{{ item.passed }}</td><td>{{ item.not_applicable }}</td><td>{{ item.unavailable }}</td></tr>
+    {% endfor %}
+  </table>
+</main>
+</body>
+</html>

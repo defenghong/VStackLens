@@ -1,0 +1,501 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-CL-001
+  rule_name: Cluster HA disabled
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P2
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - ha_enabled
+    object_path: inventory.clusters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: ha_enabled == False
+    pass_when: ha_enabled == True
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: ha_enabled
+    expected_value: true
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 集群 HA 状态
+    finding_title_zh: 集群 HA 未启用
+    plain_summary_zh: 检查 集群 HA 状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 HA 未启用。
+    title_zh: 集群 HA 未启用
+    summary_zh: Cluster HA 功能处于关闭状态。
+    business_impact_zh: 主机故障后虚拟机无法自动重启，业务恢复时间增加。
+    technical_impact_zh: 集群级高可用保护不可用。
+    consequence_zh: 单台主机故障可能扩大为业务中断。
+    remediation_zh: 评估集群容量后启用 HA，并验证 HA 健康状态。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查集群剩余容量和故障切换策略
+    - 在维护窗口启用 vSphere HA
+    - 验证 HA 健康状态并复跑巡检
+  references:
+  - title: vSphere Availability
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Cluster
+    tags:
+    - ha
+  scoring:
+    dimension: availability
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-CL-002
+  rule_name: HA admission control disabled
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P2
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - ha_enabled
+    - admission_control_enabled
+    object_path: inventory.clusters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: ha_enabled == True and admission_control_enabled == False
+    pass_when: ha_enabled == False or admission_control_enabled == True
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: admission_control_enabled
+    expected_value: true
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 集群 HA 接入控制状态
+    finding_title_zh: 集群 HA Admission Control 未启用
+    plain_summary_zh: 检查 集群 HA 接入控制状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 HA Admission Control 未启用。
+    title_zh: HA 接入控制未启用
+    summary_zh: HA Admission Control 处于关闭状态。
+    business_impact_zh: 集群可能没有预留足够故障切换容量。
+    technical_impact_zh: 主机故障后虚拟机可能因资源不足无法重启。
+    consequence_zh: HA 保护等级降低，故障恢复结果不可控。
+    remediation_zh: 根据业务等级启用合适的 Admission Control 策略。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 评估故障切换容量需求
+    - 启用并配置 Admission Control 策略
+    - 验证故障切换容量和 HA 健康状态
+  references:
+  - title: vSphere Availability
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Cluster
+    tags:
+    - ha
+  scoring:
+    dimension: availability
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-CL-003
+  rule_name: Cluster DRS disabled
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - drs_enabled
+    object_path: inventory.clusters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: drs_enabled == False
+    pass_when: drs_enabled == True
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: drs_enabled
+    expected_value: true
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 集群 DRS 状态
+    finding_title_zh: 集群 DRS 未启用
+    plain_summary_zh: 检查 集群 DRS 状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 DRS 未启用。
+    title_zh: 集群 DRS 未启用
+    summary_zh: Cluster DRS 功能处于关闭状态。
+    business_impact_zh: 集群无法自动均衡工作负载，可能影响业务性能稳定性。
+    technical_impact_zh: 主机热点可能长期存在，资源调度依赖人工处理。
+    consequence_zh: 性能不均衡、资源浪费和人工运维成本增加。
+    remediation_zh: 检查虚拟机规则后启用 DRS。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查虚拟机反亲和/亲和规则
+    - 在维护窗口启用 DRS
+    - 观察迁移建议和集群负载均衡效果
+  references:
+  - title: vSphere Resource Management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Cluster
+    tags:
+    - drs
+  scoring:
+    dimension: performance
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-CL-004
+  rule_name: DRS manual mode
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - drs_enabled
+    - drs_behavior
+    object_path: inventory.clusters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: drs_enabled == True and drs_behavior == 'manual'
+    pass_when: drs_enabled == False or drs_behavior != 'manual'
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: drs_behavior
+    expected_value: fullyAutomated
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 集群 DRS 自动化级别
+    finding_title_zh: 集群 DRS 处于手动模式
+    plain_summary_zh: 检查 集群 DRS 自动化级别，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 DRS 处于手动模式。
+    title_zh: DRS 处于手动模式
+    summary_zh: DRS 已启用但自动化级别为 manual。
+    business_impact_zh: 负载均衡依赖人工确认，响应速度较慢。
+    technical_impact_zh: 迁移建议不会自动执行，热点主机可能持续存在。
+    consequence_zh: 性能热点缓解不及时，运维处理成本增加。
+    remediation_zh: 评估规则和业务约束后调整为半自动或全自动。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查 DRS 规则和业务限制
+    - 调整 DRS 自动化级别
+    - 观察迁移建议和实际迁移效果
+  references:
+  - title: vSphere Resource Management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Cluster
+    tags:
+    - drs
+  scoring:
+    dimension: performance
+    weight: 0.5
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-CL-005
+  rule_name: Cluster CPU usage high
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: performance
+    api_paths:
+    - cluster_cpu_usage_avg
+    object_path: inventory.clusters
+    sampling:
+      required: true
+      window_minutes: 60
+      statistic: average
+      minimum_samples: 3
+  condition:
+    type: safe_expression
+    fail_when: cluster_cpu_usage_avg >= 80
+    pass_when: cluster_cpu_usage_avg < 80
+  severity_policy:
+    type: threshold
+    default_level: P2
+    rules:
+    - when: cluster_cpu_usage_avg >= 90
+      level: P1
+    - when: cluster_cpu_usage_avg >= 80
+      level: P2
+  evidence_schema:
+    current_value_path: cluster_cpu_usage_avg
+    expected_value: < 80
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 集群 CPU 使用率
+    finding_title_zh: 集群 CPU 使用率过高
+    plain_summary_zh: 检查 集群 CPU 使用率，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群 CPU 使用率过高。
+    title_zh: 集群 CPU 使用率过高
+    summary_zh: 集群 CPU 平均使用率超过阈值。
+    business_impact_zh: 新增业务和故障切换容量被压缩。
+    technical_impact_zh: DRS 调度和 HA 预留容量可能受到限制。
+    consequence_zh: 新增工作负载或故障切换时可能出现资源不足。
+    remediation_zh: 均衡工作负载，必要时增加主机容量。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: high
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 分析集群内高负载主机和虚拟机
+    - 迁移或调整工作负载分布
+    - 评估新增主机或 CPU 容量扩展
+  references:
+  - title: vSphere performance
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Cluster
+    tags:
+    - performance
+  scoring:
+    dimension: performance
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-CL-006
+  rule_name: Cluster ESXi versions inconsistent
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - host_version_distinct_count
+    object_path: inventory.clusters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: host_version_distinct_count > 1
+    pass_when: host_version_distinct_count <= 1
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: host_version_distinct_count
+    expected_value: 1
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 集群 ESXi 版本一致性
+    finding_title_zh: 集群内 ESXi 版本不一致
+    plain_summary_zh: 检查 集群 ESXi 版本一致性，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现集群内 ESXi 版本不一致。
+    title_zh: 集群内 ESXi 版本不一致
+    summary_zh: 同一集群内存在多个 ESXi 版本。
+    business_impact_zh: 运维复杂度和兼容性风险增加。
+    technical_impact_zh: vMotion、补丁一致性和硬件兼容性可能受到影响。
+    consequence_zh: 故障排查、升级和扩容复杂度上升。
+    remediation_zh: 完成兼容性检查后统一主机版本。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: high
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对集群内各 ESXi 主机版本
+    - 检查硬件兼容性和升级路径
+    - 按维护窗口分批修补并统一版本
+  references:
+  - title: vSphere lifecycle
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Cluster
+    tags:
+    - version
+  scoring:
+    dimension: compatibility
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix

@@ -1,0 +1,513 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-HOST-001
+  rule_name: ESXi host disconnected
+  category: host
+  object_type: HostSystem
+  risk_level: P1
+  health_impact: critical
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - connection_state
+    object_path: inventory.hosts
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: connection_state != 'connected'
+    pass_when: connection_state == 'connected'
+  severity_policy:
+    type: fixed
+    default_level: P1
+    rules: []
+  evidence_schema:
+    current_value_path: connection_state
+    expected_value: connected
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: ESXi 主机连接状态
+    finding_title_zh: ESXi 主机连接异常
+    plain_summary_zh: 检查 ESXi 主机连接状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机连接异常。
+    title_zh: ESXi 主机连接异常
+    summary_zh: ESXi 主机在 vCenter 中处于非 connected 状态。
+    business_impact_zh: 主机管理、虚拟机操作和故障处置可能受到影响。
+    technical_impact_zh: HA、DRS 和 vCenter 任务可能无法正常执行。
+    consequence_zh: 可能导致虚拟机可见性下降、迁移失败或可用性风险。
+    remediation_zh: 检查管理网络和主机代理服务，恢复后重新连接主机。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查 ESXi 管理网络连通性
+    - 检查 hostd/vpxa 服务状态
+    - 在 vCenter 中重新连接主机并复跑巡检
+  references:
+  - title: vSphere host management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Host
+    tags:
+    - host
+  scoring:
+    dimension: availability
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-HOST-002
+  rule_name: ESXi SSH enabled
+  category: host
+  object_type: HostSystem
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - ssh_running
+    object_path: inventory.hosts
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: ssh_running == True
+    pass_when: ssh_running == False
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: ssh_running
+    expected_value: false
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    when_to_ignore_zh: 正在进行厂商排障、主机修复或应急维护，且已限定来源和时间窗口时可临时忽略。
+    exception_guidance_zh: 提供维护工单、开启原因、预计关闭时间和负责人；到期后必须复核 SSH 是否关闭。
+    false_positive_notes_zh: 维护窗口内临时开启 SSH 属于常见操作；长期运行或无变更单支撑时才应作为整改项。
+    check_name_zh: ESXi 主机 SSH 服务状态
+    finding_title_zh: ESXi 主机 SSH 服务已开启
+    plain_summary_zh: 检查 ESXi 主机 SSH 服务状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机 SSH 服务已开启。
+    title_zh: ESXi SSH 服务已开启
+    summary_zh: ESXi 主机 SSH 服务处于运行状态。
+    business_impact_zh: 主机攻击面扩大，安全审计压力增加。
+    technical_impact_zh: 可通过 Shell 直接访问主机，可能绕过标准运维流程。
+    consequence_zh: 存在未授权变更、弱口令攻击或暴力破解风险。
+    remediation_zh: 非维护期间关闭 SSH，并将启动策略设为手动。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 进入 ESXi 主机服务管理界面
+    - 停止 TSM-SSH 服务
+    - 将 SSH 启动策略调整为手动并复跑巡检
+  references:
+  - title: vSphere security
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Host
+    tags:
+    - security
+    - ssh
+  scoring:
+    dimension: security
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-HOST-003
+  rule_name: ESXi NTP not configured
+  category: host
+  object_type: HostSystem
+  risk_level: P2
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - ntp_server_count
+    object_path: inventory.hosts
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: ntp_server_count < 1
+    pass_when: ntp_server_count >= 1
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: ntp_server_count
+    expected_value: '>= 1'
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: ESXi 主机时间同步配置
+    finding_title_zh: ESXi 主机 NTP 未配置
+    plain_summary_zh: 检查 ESXi 主机时间同步配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机 NTP 未配置。
+    title_zh: ESXi 未配置 NTP
+    summary_zh: ESXi 主机未配置 NTP 服务器。
+    business_impact_zh: 时间漂移会影响日志审计、证书校验和故障定位。
+    technical_impact_zh: 认证、HA 代理和组件通信可能受到时间差影响。
+    consequence_zh: 可能出现登录异常、证书异常或事件时间线不准确。
+    remediation_zh: 配置可信 NTP 服务器，启动并验证时间同步。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 配置企业标准 NTP 服务器
+    - 启动 NTP 服务并设置随主机启动
+    - 验证主机时间同步状态
+  references:
+  - title: vSphere time configuration
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Host
+    tags:
+    - ntp
+  scoring:
+    dimension: security
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-HOST-004
+  rule_name: ESXi lockdown disabled
+  category: host
+  object_type: HostSystem
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - lockdown_mode
+    object_path: inventory.hosts
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: lockdown_mode == 'disabled'
+    pass_when: lockdown_mode != 'disabled'
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: lockdown_mode
+    expected_value: enabled
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    when_to_ignore_zh: 隔离管理网络、强化账号审计且客户安全基线暂不要求 Lockdown Mode 时可作为例外。
+    exception_guidance_zh: 若客户接受直接主机访问风险，应记录安全负责人审批、应急账号控制和下一次基线复核时间。
+    false_positive_notes_zh: 部分客户出于应急登录、第三方管理或存量运维习惯，可能未启用 Lockdown Mode；该项属于安全基线差异。
+    check_name_zh: ESXi 主机锁定模式配置
+    finding_title_zh: ESXi 主机 Lockdown Mode 未启用
+    plain_summary_zh: 检查 ESXi 主机锁定模式配置，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机 Lockdown Mode 未启用。
+    title_zh: ESXi Lockdown 模式未启用
+    summary_zh: ESXi 主机 Lockdown 模式处于 disabled 状态。
+    business_impact_zh: 主机访问控制较弱，安全合规风险增加。
+    technical_impact_zh: 直接主机访问可能绕过 vCenter 统一审计。
+    consequence_zh: 可能导致审计缺失、权限绕行或未授权操作。
+    remediation_zh: 评估运维流程和例外账号后启用 Lockdown 模式。
+  remediation:
+    owner_role: security_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 梳理需要保留的例外账号和应急流程
+    - 在维护窗口启用 Lockdown 模式
+    - 验证 vCenter 管理和应急访问路径
+  references:
+  - title: vSphere security
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Host
+    tags:
+    - security
+  scoring:
+    dimension: security
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-HOST-005
+  rule_name: ESXi CPU usage high
+  category: host
+  object_type: HostSystem
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: performance
+    api_paths:
+    - cpu_usage_avg
+    object_path: inventory.hosts
+    sampling:
+      required: true
+      window_minutes: 60
+      statistic: average
+      minimum_samples: 3
+  condition:
+    type: safe_expression
+    fail_when: cpu_usage_avg >= 85
+    pass_when: cpu_usage_avg < 85
+  severity_policy:
+    type: threshold
+    default_level: P2
+    rules:
+    - when: cpu_usage_avg >= 90
+      level: P1
+    - when: cpu_usage_avg >= 85
+      level: P2
+  evidence_schema:
+    current_value_path: cpu_usage_avg
+    expected_value: < 85
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: ESXi 主机 CPU 使用率
+    finding_title_zh: ESXi 主机 CPU 使用率过高
+    plain_summary_zh: 检查 ESXi 主机 CPU 使用率，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机 CPU 使用率过高。
+    title_zh: ESXi CPU 使用率过高
+    summary_zh: ESXi 主机 CPU 使用率超过阈值。
+    business_impact_zh: 虚拟机性能可能下降，业务响应变慢。
+    technical_impact_zh: CPU 争用增加，调度等待时间可能上升。
+    consequence_zh: 可能引发应用性能波动、批处理延迟或迁移压力。
+    remediation_zh: 识别高负载虚拟机，均衡负载或规划扩容。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 定位 CPU 高负载虚拟机
+    - 通过 vMotion 或 DRS 均衡负载
+    - 评估主机 CPU 容量并制定扩容计划
+  references:
+  - title: vSphere performance
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Host
+    tags:
+    - performance
+  scoring:
+    dimension: performance
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-HOST-006
+  rule_name: ESXi memory usage high
+  category: host
+  object_type: HostSystem
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: performance
+    api_paths:
+    - memory_usage_avg
+    object_path: inventory.hosts
+    sampling:
+      required: true
+      window_minutes: 60
+      statistic: average
+      minimum_samples: 3
+  condition:
+    type: safe_expression
+    fail_when: memory_usage_avg >= 85
+    pass_when: memory_usage_avg < 85
+  severity_policy:
+    type: threshold
+    default_level: P2
+    rules:
+    - when: memory_usage_avg >= 90
+      level: P1
+    - when: memory_usage_avg >= 85
+      level: P2
+  evidence_schema:
+    current_value_path: memory_usage_avg
+    expected_value: < 85
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: ESXi 主机内存使用率
+    finding_title_zh: ESXi 主机内存使用率过高
+    plain_summary_zh: 检查 ESXi 主机内存使用率，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现ESXi 主机内存使用率过高。
+    title_zh: ESXi 内存使用率过高
+    summary_zh: ESXi 主机内存使用率超过阈值。
+    business_impact_zh: 虚拟机稳定性和业务性能可能受到影响。
+    technical_impact_zh: 可能触发内存 Balloon、Swap 或主机内存争用。
+    consequence_zh: 可能导致应用响应变慢、磁盘 IO 增加或虚拟机性能下降。
+    remediation_zh: 识别内存压力来源，均衡负载或增加内存容量。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 定位内存高占用虚拟机
+    - 检查 Balloon/Swap 指标
+    - 均衡负载或制定内存扩容计划
+  references:
+  - title: vSphere resource management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: Host
+    tags:
+    - performance
+  scoring:
+    dimension: performance
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix

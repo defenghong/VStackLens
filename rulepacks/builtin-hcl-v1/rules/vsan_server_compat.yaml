@@ -1,0 +1,63 @@
+rules:
+  - &vsan_rule
+    schema_version: 1.0
+    rule_id: VSL-VSAN-001
+    rule_name: vSAN controller compatibility
+    category: upgrade_compatibility
+    object_type: HostPciDevice
+    risk_level: P1
+    confidence_level: high
+    enabled: true
+    rule_version: 1.0.0
+    applicable_versions: [vSphere 7.x, vSphere 8.x, vSphere 9.x]
+    implementation_status: implemented
+    execution_mode: optional_enabled
+    capability_required: [hcl_data, vsan_context]
+    report_visibility: [show_in_rule_catalog, show_in_executed_matrix]
+    scoring_eligible: false
+    data_source: {type: hcl, source_domain: plugin, api_paths: [], object_path: inventory.host_pci_devices}
+    parameters:
+      target_release: {type: string, default: ESXi 8.0 U3, override_allowed: true}
+      vsan_check_mode: {type: string, default: auto, allowed_values: [auto, force, skip], override_allowed: true}
+      queue_depth_min: {type: number, default: 256, override_allowed: true}
+    condition: {type: plugin, plugin_name: vsan_compatibility, not_applicable_when: category != 'controller'}
+    severity_policy: {type: fixed, default_level: P1, rules: []}
+    evidence_schema: {current_value_path: category, expected_value: VSAN_CERTIFIED, required_fields: [run_id, rule_id, object_key, object_name, data_quality]}
+    report_fields:
+      title_zh: vSAN 控制器兼容性
+      check_name_zh: vSAN queueDepth 与模式认证
+      finding_title_zh: 控制器不满足 vSAN 专项认证
+      plain_summary_zh: 基于 vSAN HCL 检查队列深度和控制器工作模式。
+      failed_summary_zh: 控制器队列深度或 vSAN 认证模式不符合要求。
+      summary_zh: 控制器需满足 vSAN 队列深度与模式认证。
+      business_impact_zh: 不满足 vSAN 专项要求可能影响存储性能和支持性。
+      technical_impact_zh: HCL 队列深度或模式要求未满足。
+      consequence_zh: 可能产生性能瓶颈或无法获得厂商支持。
+      remediation_zh: 按 vSAN HCL 核对控制器模式和驱动固件组合。
+    remediation: {owner_role: virtualization_admin, remediation_effort: high, maintenance_window_required: true, rollback_required: true, verification_method: rerun_rule, steps_zh: [核对 vSAN 集群架构, 核对控制器模式, 按 HCL 更新后复检]}
+    references: [{title: Broadcom Compatibility Guide, url: https://compatibilityguide.broadcom.com/}]
+    report: {section: Upgrade Compatibility, tags: [hcl, vsan]}
+    scoring: {dimension: upgrade_compatibility, weight: 0.0}
+  - <<: *vsan_rule
+    rule_id: VSL-SERVER-001
+    rule_name: Server model upgrade compatibility
+    object_type: HostSystem
+    capability_required: [hcl_data]
+    data_source: {type: hcl, source_domain: plugin, api_paths: [], object_path: inventory.hosts}
+    parameters:
+      target_release: {type: string, default: ESXi 8.0 U3, override_allowed: true}
+    condition: {type: plugin, plugin_name: server_compatibility}
+    evidence_schema: {current_value_path: smbios_model, expected_value: SERVER_CERTIFIED, required_fields: [run_id, rule_id, object_key, object_name, data_quality]}
+    report_fields:
+      title_zh: 整机型号兼容性
+      check_name_zh: VCG server 型号认证
+      finding_title_zh: 整机型号未通过目标版本认证
+      plain_summary_zh: 基于 VCG server 类别检查主机 SMBiosModel。
+      failed_summary_zh: 整机型号未列入目标 ESXi 版本认证。
+      summary_zh: 整机型号需在 VCG server 类别中认证。
+      business_impact_zh: 未认证整机可能影响升级支持性。
+      technical_impact_zh: SMBiosModel 没有目标版本 server 认证记录。
+      consequence_zh: 可能无法获得升级后的完整厂商支持。
+      remediation_zh: 核对实际整机型号和 VCG server 认证条目。
+    remediation: {owner_role: virtualization_admin, remediation_effort: medium, maintenance_window_required: false, rollback_required: false, verification_method: rerun_rule, steps_zh: [核对主机 SMBiosModel, 核对 VCG server 条目]}
+    report: {section: Upgrade Compatibility, tags: [hcl, server]}

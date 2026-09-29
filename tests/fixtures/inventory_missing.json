@@ -1,0 +1,15 @@
+{
+  "objects": [
+    {
+      "object_type": "HostSystem",
+      "object_key": "host-1",
+      "object_name": "esxi-01.lab.local",
+      "object_path": "Default/mock-vcenter.local/Cluster-01/esxi-01.lab.local",
+      "properties": {
+        "ssh_running": false,
+        "host_certificate_probe_status": "仅发现 sslThumbprint，当前 vCenter 未返回证书到期时间字段",
+        "host_license_probe_status": "当前 vCenter 未返回主机授权信息字段"
+      }
+    }
+  ]
+}

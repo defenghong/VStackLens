@@ -1,0 +1,11 @@
+schema_version: 1.0
+rulepack_id: builtin-vsphere-v1
+name: VStackLens Built-in vSphere Rules
+version: 1.0.0
+vendor: VStackLens
+description: Built-in VMware vSphere inspection rules for M1.
+applicable_products:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x

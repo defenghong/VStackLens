@@ -1,0 +1,424 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-VC-001
+  rule_name: vCenter connection failed
+  category: vcenter
+  object_type: vCenter
+  risk_level: P1
+  health_impact: critical
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - connected
+    object_path: inventory.vcenters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: connected == False
+    pass_when: connected == True
+  severity_policy:
+    type: fixed
+    default_level: P1
+    rules: []
+  evidence_schema:
+    current_value_path: connected
+    expected_value: true
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: vCenter 连通性
+    finding_title_zh: vCenter 连接失败
+    plain_summary_zh: 检查 vCenter 连通性，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现vCenter 连接失败。
+    title_zh: vCenter 连接失败
+    summary_zh: 巡检账号无法连接目标 vCenter。
+    business_impact_zh: 管理平面不可用，巡检、运维和变更操作会受到影响。
+    technical_impact_zh: vCenter API 无法访问，后续资产采集和规则判断无法继续。
+    consequence_zh: 可能导致巡检失败、告警遗漏或运维操作中断。
+    remediation_zh: 检查网络连通性、DNS、vCenter 服务状态和账号凭据。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查客户端到 vCenter 的网络连通性
+    - 确认账号、密码和权限是否正确
+    - 检查 vCenter 服务状态后重新发起巡检
+  references:
+  - title: vSphere Management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vCenter
+    tags:
+    - vcenter
+  scoring:
+    dimension: availability
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VC-002
+  rule_name: vCenter 6.7 legacy version
+  category: vcenter
+  object_type: vCenter
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - version
+    object_path: inventory.vcenters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: version starts_with '6.7'
+    pass_when: version not starts_with '6.7'
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: version
+    expected_value: 7.x/8.x/9.x
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: vCenter 生命周期管理
+    finding_title_zh: vCenter 版本处于存量生命周期阶段
+    plain_summary_zh: 检查 vCenter 生命周期管理，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现vCenter 版本处于存量生命周期阶段。
+    title_zh: vCenter 版本处于 6.7 存量阶段
+    summary_zh: 当前 vCenter 运行在 6.7 legacy 版本。
+    business_impact_zh: 生命周期和兼容性风险增加，后续扩容、升级和厂商支持可能受限。
+    technical_impact_zh: 新版本修复、硬件兼容性和安全补丁可能无法获得。
+    consequence_zh: 长期运行可能增加安全、稳定性和升级失败风险。
+    remediation_zh: 完成兼容性评估后规划升级路径。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: high
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 核对 vCenter、ESXi、硬件和备份系统兼容性
+    - 升级前备份 VCSA 并确认回退方案
+    - 制定升级窗口和升级实施计划
+  references:
+  - title: vCenter lifecycle
+    url: https://knowledge.broadcom.com/
+  report:
+    section: vCenter
+    tags:
+    - version
+  scoring:
+    dimension: compatibility
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VC-004
+  rule_name: vCenter red alarms active
+  category: vcenter
+  object_type: vCenter
+  risk_level: P2
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: alarm
+    api_paths:
+    - red_alarm_count
+    object_path: inventory.vcenters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: red_alarm_count > 0
+    pass_when: red_alarm_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: red_alarm_count
+    expected_value: 0
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: vCenter 告警状态
+    finding_title_zh: vCenter 存在红色活动告警
+    plain_summary_zh: 检查 vCenter 告警状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现vCenter 存在红色活动告警。
+    title_zh: vCenter 存在红色活动告警
+    summary_zh: vCenter 或其管理对象存在红色活动告警。
+    business_impact_zh: 重要故障可能仍处于活动状态，需要优先确认影响范围。
+    technical_impact_zh: 红色告警通常表示对象处于异常或不可用状态。
+    consequence_zh: 忽略活动告警可能掩盖真实故障并扩大影响。
+    remediation_zh: 逐项检查告警根因，确认恢复后清理已解决告警。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: manual_check
+    steps_zh:
+    - 在 vCenter 中查看红色活动告警列表
+    - 定位告警关联对象和根因
+    - 完成修复后清理已恢复的告警
+  references:
+  - title: vSphere monitoring
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vCenter
+    tags:
+    - alarm
+  scoring:
+    dimension: availability
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VC-005
+  rule_name: vCenter certificate expiring
+  category: vcenter
+  object_type: vCenter
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: certificate_collector
+    source_domain: plugin
+    api_paths: []
+    object_path: inventory.vcenters
+    sampling:
+      required: false
+  parameters:
+    certificate_warning_days:
+      type: number
+      default: 90
+      override_allowed: true
+    certificate_critical_days:
+      type: number
+      default: 30
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: certificate_days_remaining <= certificate_warning_days
+    pass_when: certificate_days_remaining > certificate_warning_days
+  severity_policy:
+    type: threshold
+    default_level: P2
+    rules:
+    - when: certificate_days_remaining <= certificate_critical_days
+      level: P1
+    - when: certificate_days_remaining <= certificate_warning_days
+      level: P2
+  evidence_schema:
+    current_value_path: certificate_days_remaining
+    expected_value: '> 90'
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: vCenter 证书状态
+    finding_title_zh: vCenter 证书即将过期
+    plain_summary_zh: 检查 vCenter 证书状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现vCenter 证书即将过期。
+    title_zh: vCenter 证书即将过期
+    summary_zh: vCenter 证书剩余有效期低于阈值。
+    business_impact_zh: 登录、组件通信和第三方集成可能受到影响。
+    technical_impact_zh: SSL 或 STS 证书过期会影响信任链和服务认证。
+    consequence_zh: 证书过期后可能导致 vCenter 服务异常或不可用。
+    remediation_zh: 按官方流程续期证书，并在维护窗口内完成验证。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: high
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 备份 vCenter 并确认证书类型
+    - 按官方流程续期或替换证书
+    - 重启相关服务并验证登录和组件通信
+  references:
+  - title: vSphere certificate management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vCenter
+    tags:
+    - certificate
+  scoring:
+    dimension: security
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VC-006
+  rule_name: vCenter license expiring
+  category: vcenter
+  object_type: vCenter
+  risk_level: P2
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - license_days_remaining
+    object_path: inventory.vcenters
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: license_days_remaining <= 30
+    pass_when: license_days_remaining > 30
+  severity_policy:
+    type: threshold
+    default_level: P2
+    rules:
+    - when: license_days_remaining <= 0
+      level: P1
+    - when: license_days_remaining <= 30
+      level: P2
+  evidence_schema:
+    current_value_path: license_days_remaining
+    expected_value: '> 30'
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: vCenter License 状态
+    finding_title_zh: vCenter License 即将过期
+    plain_summary_zh: 检查 vCenter License 状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现vCenter License 即将过期。
+    title_zh: vCenter License 即将过期
+    summary_zh: License 已过期或接近过期。
+    business_impact_zh: 许可连续性和合规风险增加。
+    technical_impact_zh: 部分功能、扩容或支持能力可能受到限制。
+    consequence_zh: 可能引发授权合规、支持和功能可用性问题。
+    remediation_zh: 续订并应用 License，完成后复跑巡检确认。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查当前 License 类型和到期时间
+    - 完成 License 续订或替换
+    - 应用 License 后复跑巡检确认
+  references:
+  - title: vSphere license management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vCenter
+    tags:
+    - license
+  scoring:
+    dimension: compliance
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix

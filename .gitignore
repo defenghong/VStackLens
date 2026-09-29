@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and bundled runtimes
+.venv/
+venv/
+env/
+.python312/
+
+# Build and packaging output
+build/
+dist/
+*.spec.bak
+
+# Runtime and generated data
+data/
+data/hcl/
+all.json
+out/
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+
+# Test scratch directories from extracted handoff bundle
+VStackLensoutpytest-*/
+tmp_m2a_probe/
+
+# Local editor and OS files
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Offline vendor runtime staged by build tooling
+.tools/collector-runtime/
+
+# Local acceptance runs and vendor runtime staging
+/tmp/
+/.tools/
+/.backup/
+/output/
+/PACKAGING.md
+/RELEASE_CHECKLIST.md
+/=

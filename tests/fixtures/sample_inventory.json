@@ -1,0 +1,194 @@
+{
+  "objects": [
+    {
+      "object_type": "vCenter",
+      "object_key": "vc-1",
+      "object_name": "mock-vcenter.local",
+      "object_path": "Default/mock-vcenter.local",
+      "properties": {
+        "connected": true,
+        "version": "8.0.3",
+        "build_current": true,
+        "red_alarm_count": 0,
+        "certificate_days_remaining": 300,
+        "license_days_remaining": 365,
+        "vcenter_admin_account_count": 2,
+        "vcenter_admin_principals": [
+          "VSPHERE.LOCAL\\Administrators",
+          "administrator@vsphere.local"
+        ],
+        "task_backlog_count": 0,
+        "task_backlog_items": [],
+        "role_permission_inheritance_issue_count": 1,
+        "role_permission_inheritance_issues": [
+          {
+            "principal": "VSPHERE.LOCAL\\Administrators",
+            "role": "Administrator",
+            "entity": "Datacenters"
+          }
+        ]
+      }
+    },
+    {
+      "object_type": "ClusterComputeResource",
+      "object_key": "domain-c1",
+      "object_name": "Cluster-01",
+      "object_path": "Default/mock-vcenter.local/Cluster-01",
+      "properties": {
+        "ha_enabled": true,
+        "admission_control_enabled": true,
+        "drs_enabled": true,
+        "drs_behavior": "fullyAutomated",
+        "cluster_cpu_usage_avg": 45,
+        "host_version_distinct_count": 1,
+        "evc_enabled": true,
+        "evc_mode": "intel-broadwell",
+        "host_cpu_models": [
+          "Intel Broadwell"
+        ],
+        "host_cpu_model_distinct_count": 1,
+        "host_memory_capacity_gb_values": [
+          256,
+          256
+        ],
+        "host_memory_capacity_skew_ratio": 0,
+        "drs_disabled_rule_count": 0,
+        "drs_disabled_rules": [],
+        "ha_heartbeat_datastore_count": 2,
+        "heartbeat_datastore_names": [
+          "datastore-prod-01",
+          "datastore-prod-02"
+        ],
+        "ha_isolation_response": "none",
+        "maintenance_host_count": 0,
+        "maintenance_hosts": [],
+        "host_count": 1,
+        "vmotion_enabled_host_count": 1,
+        "cluster_vmotion_missing_host_count": 0,
+        "missing_vmotion_hosts": []
+      }
+    },
+    {
+      "object_type": "HostSystem",
+      "object_key": "host-1",
+      "object_name": "esxi-01.lab.local",
+      "object_path": "Default/mock-vcenter.local/Cluster-01/esxi-01.lab.local",
+      "properties": {
+        "connection_state": "connected",
+        "ssh_running": false,
+        "ntp_server_count": 2,
+        "lockdown_mode": "lockdownNormal",
+        "cpu_usage_avg": 35,
+        "memory_usage_avg": 45,
+        "esxi_shell_running": false,
+        "syslog_configured": true,
+        "syslog_targets": [
+          "udp://syslog.lab.local:514"
+        ],
+        "firewall_default_incoming_blocked": true,
+        "physical_nic_link_issue_count": 0,
+        "pnic_down_count": 0,
+        "pnic_degraded_count": 0,
+        "affected_nics": [],
+        "link_speed_detail": [],
+        "storage_path_dead_count": 0,
+        "affected_storage_paths": [],
+        "vswitch_uplink_issue_count": 0,
+        "affected_switches": [],
+        "affected_uplinks": [],
+        "vmkernel_mtu_values": [
+          1500,
+          1500
+        ],
+        "vmotion_vmk_count": 1,
+        "vmkernel_adapters": [
+          {
+            "device": "vmk0",
+            "portgroup": "Management Network",
+            "mtu": 1500
+          },
+          {
+            "device": "vmk1",
+            "portgroup": "vMotion",
+            "mtu": 1500
+          }
+        ],
+        "management_uplink_count": 2,
+        "host_certificate_days_remaining": 365,
+        "host_certificate_not_after": "2027-06-04",
+        "host_certificate_subject": "CN=esxi-01.lab.local",
+        "host_certificate_issuer": "CN=VMware VMCA",
+        "host_certificate_probe_status": "已从 config.certificate 采集证书到期时间",
+        "host_license_assigned": true,
+        "host_license_name": "VMware vSphere Enterprise Plus",
+        "host_license_edition": "Enterprise Plus",
+        "host_license_is_evaluation": false,
+        "host_license_expiration_date": "永久授权",
+        "host_license_expiration_days": 999999,
+        "host_license_probe_status": "已从 licenseAssignmentManager 采集授权记录",
+        "host_log_core_dump_configured": true,
+        "host_log_core_dump_detail": "日志目标：udp://syslog.lab.local:514；核心转储：已配置",
+        "pnic_error_count": 0,
+        "pnic_error_detail": []
+      }
+    },
+    {
+      "object_type": "Datastore",
+      "object_key": "datastore-1",
+      "object_name": "datastore-prod-01",
+      "object_path": "Default/mock-vcenter.local/datastore-prod-01",
+      "properties": {
+        "used_percent": 55,
+        "accessible": true,
+        "latency_avg_ms": 5,
+        "free_percent": 45,
+        "alarm_count": 0,
+        "attached_host_count": 3,
+        "datastore_multipath_applicable": true,
+        "datastore_multipath_issue_count": 0,
+        "datastore_active_path_count": 4,
+        "datastore_total_path_count": 4,
+        "datastore_path_issue_detail": [],
+        "thin_provisioning_overcommit_ratio": 110,
+        "datastore_filesystem_type": "VMFS",
+        "datastore_filesystem_version": "6",
+        "datastore_filesystem_legacy": false
+      }
+    },
+    {
+      "object_type": "VirtualMachine",
+      "object_key": "vm-1",
+      "object_name": "app-01",
+      "object_path": "Default/mock-vcenter.local/app-01",
+      "properties": {
+        "snapshot_age_days_max": 0,
+        "snapshot_chain_depth": 0,
+        "power_state": "poweredOn",
+        "tools_running": true,
+        "tools_outdated": false,
+        "vmware_tools_installed": true,
+        "tools_install_status": "guestToolsCurrent",
+        "cpu_ready_percent": 1,
+        "swap_or_balloon_mb": 0,
+        "iso_mounted": false,
+        "vm_reservation_too_high": false,
+        "vm_resource_limit_present": false,
+        "vcpu_count": 4,
+        "thin_disk_count": 1,
+        "nonpersistent_disk_count": 0,
+        "disk_provisioning_modes": [
+          "thin"
+        ],
+        "numa_affinity_configured": false,
+        "numa_affinity_nodes": [],
+        "hardware_version": "vmx-19",
+        "hardware_version_number": 19,
+        "needs_consolidation": false,
+        "invalid_network_count": 0,
+        "orphaned_or_inaccessible": false,
+        "passthrough_device_count": 0,
+        "powered_off_days": 0
+      }
+    }
+  ]
+}

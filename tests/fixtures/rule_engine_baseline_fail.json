@@ -1,0 +1,5 @@
+{
+  "fixture": "inventory_fail.json",
+  "result_count": 85,
+  "snapshot_sha256": "97462aba0f5ec1f8df3cec07354b8812926f7e8c4dc517428ce99232e1682488"
+}

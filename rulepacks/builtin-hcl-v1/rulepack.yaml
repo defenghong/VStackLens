@@ -1,0 +1,10 @@
+schema_version: 1.0
+rulepack_id: builtin-hcl-v1
+name: VStackLens Built-in HCL Rules
+version: 1.0.0
+vendor: VStackLens
+description: HCL-backed upgrade compatibility rules.
+applicable_products:
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x

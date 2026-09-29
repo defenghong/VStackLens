@@ -1,0 +1,14 @@
+{
+  "vcenter": "",
+  "username": "",
+  "port": 443,
+  "ssl_no_verify": false,
+  "customer_name": "",
+  "report_title": "VStackLens VMware \u865a\u62df\u5316\u5065\u5eb7\u8bc4\u4f30\u62a5\u544a",
+  "report_output_dir": "",
+  "db_path": "",
+  "rulepack_path": "",
+  "zip_report": false,
+  "compare_latest": false,
+  "previous_run_id": null
+}

@@ -1,0 +1,1074 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-CL-010
+  rule_name: Cluster host CPU model consistency
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: &vsphere_versions
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: &pyvmomi_required
+  - pyvmomi
+  report_visibility: &executed_visibility
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - host_cpu_model_distinct_count
+    - host_cpu_models
+    object_path: inventory.cluster
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: host_cpu_model_distinct_count > 1
+    pass_when: host_cpu_model_distinct_count <= 1
+  severity_policy: &fixed_p4
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: host_cpu_model_distinct_count
+    expected_value: 1
+    required_fields: &required_fields
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    title_zh: 集群主机 CPU 型号差异
+    check_name_zh: 集群主机 CPU 型号一致性
+    finding_title_zh: 集群主机 CPU 型号不一致
+    plain_summary_zh: 检查集群内 ESXi 主机 CPU 型号一致性，用于评估迁移兼容性和硬件基线统一性。
+    failed_summary_zh: 集群内存在多种 CPU 型号，后续跨主机迁移和扩容兼容性需要关注。
+    false_positive_notes_zh: 已启用合适 EVC 模式且业务迁移验证通过时，该项通常属于提示性优化项。
+    exception_guidance_zh: 记录 EVC 模式、CPU 型号清单和业务迁移验证结果，并在新增主机前复核。
+    when_to_ignore_zh: 同一集群已通过 EVC 统一 CPU 特性，且没有跨代硬件扩容计划时可阶段性忽略。
+    summary_zh: 集群主机 CPU 型号差异可能影响 vMotion 兼容性和硬件生命周期管理。
+    business_impact_zh: 后续硬件扩容、主机替换或跨主机迁移时，可能增加兼容性验证和维护窗口成本。
+    technical_impact_zh: 不同 CPU 型号会暴露不同指令集能力，未统一基线时可能限制虚拟机迁移目标。
+    consequence_zh: 可能导致部分虚拟机无法迁移到特定主机，降低维护灵活性。
+    remediation_zh: 结合 EVC 策略统一集群 CPU 兼容基线，后续扩容优先保持同代或兼容 CPU 型号。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对集群内主机 CPU 型号清单。
+    - 确认当前 EVC 模式是否覆盖硬件差异。
+    - 在新增主机或迁移业务前执行 vMotion 验证。
+  references: &vmware_docs
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: cluster
+    tags:
+    - cluster
+    - compatibility
+  scoring:
+    dimension: compatibility
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-CL-011
+  rule_name: Cluster host memory capacity consistency
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - host_memory_capacity_skew_ratio
+    - host_memory_capacity_gb_values
+    object_path: inventory.cluster
+    sampling:
+      required: false
+  parameters:
+    max_memory_skew_ratio:
+      type: number
+      default: 50
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: host_memory_capacity_skew_ratio > max_memory_skew_ratio
+    pass_when: host_memory_capacity_skew_ratio <= max_memory_skew_ratio
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: host_memory_capacity_skew_ratio
+    expected_value: <= 50
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 集群主机内存容量差异
+    check_name_zh: 集群主机内存容量一致性
+    finding_title_zh: 集群主机内存容量差异较大
+    plain_summary_zh: 检查同一集群内主机内存容量差异，用于评估 DRS 负载均衡和 HA 接管余量。
+    failed_summary_zh: 集群内主机内存容量差异超过建议阈值，可能影响负载均衡和故障接管能力。
+    false_positive_notes_zh: 过渡期扩容、分批替换硬件时可能出现容量差异，该项可作为容量规划提示。
+    exception_guidance_zh: 记录扩容计划、目标硬件配置和预计统一时间。
+    when_to_ignore_zh: 已明确为混合规格集群且 DRS/HA 余量经过容量评估时可阶段性忽略。
+    summary_zh: 集群主机内存容量差异较大时，负载可能集中到大规格主机，故障接管余量也更难评估。
+    business_impact_zh: 维护或故障切换时，业务可能受到资源分布不均影响。
+    technical_impact_zh: DRS 迁移建议和 HA Admission Control 容量计算会受到主机规格差异影响。
+    consequence_zh: 可能导致局部资源热点、迁移目标受限或故障接管能力不均衡。
+    remediation_zh: 结合容量规划逐步统一主机规格，或按规格拆分集群和业务承载范围。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对集群内各主机内存容量。
+    - 评估 DRS 分布和 HA 接管余量。
+    - 制定主机规格统一或业务分组计划。
+  references: *vmware_docs
+  report:
+    section: cluster
+    tags:
+    - cluster
+    - capacity
+  scoring:
+    dimension: capacity
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-CL-012
+  rule_name: Cluster DRS rule enabled state
+  category: cluster
+  object_type: ClusterComputeResource
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - drs_disabled_rule_count
+    - drs_disabled_rules
+    object_path: inventory.cluster
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: drs_disabled_rule_count > 0
+    pass_when: drs_disabled_rule_count == 0
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: drs_disabled_rule_count
+    expected_value: 0
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 集群 DRS 规则启用状态
+    check_name_zh: 集群 DRS 规则启用状态
+    finding_title_zh: 集群存在已停用 DRS 规则
+    plain_summary_zh: 检查集群 DRS 规则启用状态，用于识别被停用的亲和或反亲和约束。
+    failed_summary_zh: 集群内存在已停用的 DRS 规则，需要确认是否为预期配置。
+    false_positive_notes_zh: 维护期间临时停用 DRS 规则属于常见操作，需关注长期停用且无说明的情况。
+    exception_guidance_zh: 记录停用原因、业务负责人和计划恢复时间。
+    when_to_ignore_zh: 规则已由业务方确认不再需要，且有配置变更记录时可忽略。
+    summary_zh: DRS 规则停用可能改变虚拟机放置策略，影响业务隔离或高可用设计。
+    business_impact_zh: 关键虚拟机可能不再按预期分散或绑定运行，影响可用性和合规要求。
+    technical_impact_zh: DRS 调度约束失效后，虚拟机布局可能偏离设计基线。
+    consequence_zh: 可能造成同类关键虚拟机集中到同一主机，或业务亲和策略未生效。
+    remediation_zh: 复核已停用 DRS 规则的业务意义，保留需要的规则并删除无效历史规则。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 查看集群 DRS 规则清单。
+    - 确认停用规则对应业务系统和变更记录。
+    - 启用仍需使用的规则，清理无效历史规则。
+  references: *vmware_docs
+  report:
+    section: cluster
+    tags:
+    - cluster
+    - drs
+  scoring:
+    dimension: operations
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-HOST-014
+  rule_name: ESXi host syslog configuration
+  category: host
+  object_type: HostSystem
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - syslog_configured
+    - syslog_targets
+    object_path: inventory.host
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: syslog_configured == False
+    pass_when: syslog_configured == True
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: syslog_configured
+    expected_value: true
+    required_fields: *required_fields
+  report_fields:
+    title_zh: ESXi 主机 Syslog 配置
+    check_name_zh: ESXi 主机 Syslog 配置
+    finding_title_zh: ESXi 主机未配置远程 Syslog
+    plain_summary_zh: 检查 ESXi 主机远程 Syslog 配置，用于确认日志可集中留存和审计。
+    failed_summary_zh: ESXi 主机未配置远程 Syslog，故障分析和安全审计证据可能不足。
+    false_positive_notes_zh: 小型测试环境可能仅保留本地日志；生产环境建议集中采集。
+    exception_guidance_zh: 记录不启用远程日志的原因和替代日志留存方案。
+    when_to_ignore_zh: 已有其他等效日志采集机制覆盖 ESXi 主机日志时可忽略。
+    summary_zh: 远程 Syslog 可提升日志留存可靠性，避免主机故障后本地日志丢失。
+    business_impact_zh: 故障追溯、安全审计和合规取证可能受到影响。
+    technical_impact_zh: ESXi 主机日志仅保存在本地时，主机重装或故障可能导致证据缺失。
+    consequence_zh: 可能延长故障定位时间，并影响安全事件审计完整性。
+    remediation_zh: 为 ESXi 主机配置企业统一 Syslog 服务器，并验证日志接收状态。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 确认企业 Syslog 服务器地址。
+    - 配置 ESXi Syslog.global.logHost。
+    - 验证 Syslog 平台能收到主机日志。
+  references: *vmware_docs
+  report:
+    section: host
+    tags:
+    - host
+    - logging
+  scoring:
+    dimension: security
+    weight: 0.8
+- schema_version: 1.0
+  rule_id: VSL-HOST-015
+  rule_name: ESXi host firewall default policy
+  category: host
+  object_type: HostSystem
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - firewall_default_incoming_blocked
+    object_path: inventory.host
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: firewall_default_incoming_blocked == False
+    pass_when: firewall_default_incoming_blocked == True
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: firewall_default_incoming_blocked
+    expected_value: true
+    required_fields: *required_fields
+  report_fields:
+    title_zh: ESXi 主机防火墙默认策略
+    check_name_zh: ESXi 主机防火墙默认策略
+    finding_title_zh: ESXi 主机防火墙默认入站策略未阻断
+    plain_summary_zh: 检查 ESXi 主机防火墙默认入站策略，用于确认主机管理面暴露面控制。
+    failed_summary_zh: ESXi 主机防火墙默认入站策略未阻断，建议复核安全基线。
+    false_positive_notes_zh: 某些受控隔离网络中可能采用外围防火墙控制，但主机侧仍建议保持最小暴露。
+    exception_guidance_zh: 记录网络隔离策略、访问控制边界和安全负责人审批。
+    when_to_ignore_zh: 已有明确的上游访问控制且主机安全基线允许时可阶段性忽略。
+    summary_zh: 防火墙默认策略用于限制未显式允许的入站访问。
+    business_impact_zh: 管理面暴露面扩大时，安全审计和攻击面风险增加。
+    technical_impact_zh: 默认入站未阻断会降低服务级规则的约束效果。
+    consequence_zh: 可能增加非预期服务被访问的风险。
+    remediation_zh: 调整 ESXi 防火墙默认入站策略为阻断，并仅开放必要服务规则。
+  remediation:
+    owner_role: security_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对当前 ESXi 防火墙默认策略。
+    - 确认业务需要开放的服务规则。
+    - 将默认入站策略调整为阻断并复核连通性。
+  references: *vmware_docs
+  report:
+    section: host
+    tags:
+    - host
+    - security
+  scoring:
+    dimension: security
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-DS-007
+  rule_name: Datastore multipath state
+  category: datastore
+  object_type: Datastore
+  risk_level: P2
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - datastore_multipath_issue_count
+    - datastore_path_issue_detail
+    object_path: inventory.datastore
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    not_applicable_when: datastore_multipath_applicable == False
+    fail_when: datastore_multipath_issue_count > 0
+    pass_when: datastore_multipath_issue_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: datastore_multipath_issue_count
+    expected_value: 0
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 数据存储多路径状态
+    check_name_zh: 数据存储多路径状态
+    finding_title_zh: 数据存储多路径状态异常
+    plain_summary_zh: 检查 VMFS 数据存储相关存储路径状态，用于确认存储访问冗余。
+    failed_summary_zh: 数据存储存在异常存储路径，可能降低存储访问冗余。
+    false_positive_notes_zh: 单主机本地存储或部分 NAS 数据存储不适用多路径判断。
+    exception_guidance_zh: 记录数据存储类型、承载业务和存储冗余设计。
+    when_to_ignore_zh: 非共享 VMFS 或不依赖多路径的存储类型可忽略。
+    summary_zh: 多路径异常会影响存储访问冗余和故障切换能力。
+    business_impact_zh: 存储链路故障时，虚拟机 I/O 可用性可能受到影响。
+    technical_impact_zh: 部分路径处于 dead、error 或 off 状态时，可用路径减少。
+    consequence_zh: 可能导致 I/O 延迟升高、路径切换失败或数据存储不可访问。
+    remediation_zh: 检查 HBA、SAN 交换机、存储目标端口和多路径策略，恢复异常路径后复查。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 查看异常路径对应主机、适配器、LUN 和目标端口。
+    - 检查 SAN 交换机和存储阵列端口状态。
+    - 恢复路径后重新扫描存储并复跑巡检。
+  references: *vmware_docs
+  report:
+    section: datastore
+    tags:
+    - datastore
+    - storage
+  scoring:
+    dimension: availability
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-DS-008
+  rule_name: Datastore active path count
+  category: datastore
+  object_type: Datastore
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - datastore_active_path_count
+    object_path: inventory.datastore
+    sampling:
+      required: false
+  parameters:
+    min_datastore_active_paths:
+      type: number
+      default: 2
+      override_allowed: true
+  condition:
+    type: safe_expression
+    not_applicable_when: datastore_multipath_applicable == False
+    fail_when: datastore_active_path_count < min_datastore_active_paths
+    pass_when: datastore_active_path_count >= min_datastore_active_paths
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: datastore_active_path_count
+    expected_value: '>= 2'
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 数据存储活动路径数量
+    check_name_zh: 数据存储活动路径数量
+    finding_title_zh: 数据存储活动路径数量低于建议值
+    plain_summary_zh: 检查 VMFS 数据存储活动路径数量，用于确认存储链路冗余。
+    failed_summary_zh: 数据存储活动路径数量低于建议值，存储链路冗余不足。
+    false_positive_notes_zh: 单路径实验环境或非关键业务数据存储可能接受较低冗余。
+    exception_guidance_zh: 记录单路径设计原因、业务影响和后续冗余改造计划。
+    when_to_ignore_zh: 明确为单主机、本地盘或非关键测试用途时可忽略。
+    summary_zh: 活动路径数量不足会降低存储链路故障切换能力。
+    business_impact_zh: 存储链路维护或故障时，业务可用性风险增加。
+    technical_impact_zh: 可用活动路径不足时，多路径策略缺少足够冗余路径。
+    consequence_zh: 可能导致路径故障时数据存储访问中断或性能下降。
+    remediation_zh: 补齐主机到存储的链路、分区和多路径配置，确保至少具备建议数量的活动路径。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对数据存储对应 LUN 的活动路径数量。
+    - 检查 HBA、交换机分区和阵列映射。
+    - 恢复或新增路径后重新扫描存储。
+  references: *vmware_docs
+  report:
+    section: datastore
+    tags:
+    - datastore
+    - storage
+  scoring:
+    dimension: availability
+    weight: 0.8
+- schema_version: 1.0
+  rule_id: VSL-DS-013
+  rule_name: Datastore thin provisioning overcommit
+  category: datastore
+  object_type: Datastore
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - thin_provisioning_overcommit_ratio
+    object_path: inventory.datastore
+    sampling:
+      required: false
+  parameters:
+    max_thin_overcommit_ratio:
+      type: number
+      default: 150
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: thin_provisioning_overcommit_ratio > max_thin_overcommit_ratio
+    pass_when: thin_provisioning_overcommit_ratio <= max_thin_overcommit_ratio
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: thin_provisioning_overcommit_ratio
+    expected_value: <= 150
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 数据存储 Thin Provisioning 超分配置
+    check_name_zh: 数据存储 Thin Provisioning 超分配置
+    finding_title_zh: 数据存储 Thin Provisioning 超分比过高
+    plain_summary_zh: 检查数据存储已用空间与未提交空间比例，用于评估 Thin Provisioning 超分风险。
+    failed_summary_zh: 数据存储 Thin Provisioning 超分比例超过建议阈值。
+    false_positive_notes_zh: 已有严格容量监控和自动扩容机制时，可接受一定程度超分。
+    exception_guidance_zh: 记录容量监控策略、扩容响应时限和存储负责人。
+    when_to_ignore_zh: 存储平台具备自动扩容且容量告警闭环成熟时可阶段性忽略。
+    summary_zh: Thin Provisioning 超分过高可能导致突发写入时空间耗尽。
+    business_impact_zh: 容量耗尽会影响虚拟机写入、快照和备份任务。
+    technical_impact_zh: 未提交空间较大时，实际写入增长可能快速消耗数据存储可用空间。
+    consequence_zh: 可能造成虚拟机暂停、写入失败或业务中断。
+    remediation_zh: 清理无效空间、迁移虚拟机或扩容数据存储，并配置容量告警。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对数据存储已用空间和未提交空间。
+    - 清理过期快照和无效磁盘。
+    - 必要时迁移虚拟机或扩容数据存储。
+  references: *vmware_docs
+  report:
+    section: datastore
+    tags:
+    - datastore
+    - capacity
+  scoring:
+    dimension: capacity
+    weight: 0.8
+- schema_version: 1.0
+  rule_id: VSL-DS-018
+  rule_name: Datastore filesystem version
+  category: datastore
+  object_type: Datastore
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - datastore_filesystem_legacy
+    - datastore_filesystem_version
+    object_path: inventory.datastore
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: datastore_filesystem_legacy == True
+    pass_when: datastore_filesystem_legacy == False
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: datastore_filesystem_version
+    expected_value: VMFS 6
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 数据存储文件系统版本
+    check_name_zh: 数据存储文件系统版本
+    finding_title_zh: 数据存储文件系统版本较旧
+    plain_summary_zh: 检查 VMFS 数据存储文件系统版本，用于识别较旧文件系统基线。
+    failed_summary_zh: 数据存储文件系统版本较旧，建议评估升级或迁移。
+    false_positive_notes_zh: 存量环境可能因兼容性保留旧 VMFS 版本，应结合业务迁移窗口评估。
+    exception_guidance_zh: 记录保留旧版本原因、兼容性约束和迁移计划。
+    when_to_ignore_zh: 数据存储仅承载遗留业务且短期不升级平台时可阶段性忽略。
+    summary_zh: 旧版 VMFS 可能缺少新版本能力，并增加生命周期管理复杂度。
+    business_impact_zh: 后续平台升级、存储迁移和功能使用可能受到限制。
+    technical_impact_zh: 旧版文件系统与新版本 vSphere 功能的兼容性和性能特性可能有限。
+    consequence_zh: 可能增加迁移改造成本，并影响后续升级路径。
+    remediation_zh: 规划数据存储迁移或新建 VMFS6 数据存储，逐步迁移虚拟机。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: high
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 确认数据存储文件系统版本和承载业务。
+    - 新建符合当前基线的数据存储。
+    - 通过 Storage vMotion 或维护窗口迁移虚拟机。
+  references: *vmware_docs
+  report:
+    section: datastore
+    tags:
+    - datastore
+    - lifecycle
+  scoring:
+    dimension: compatibility
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-VM-007
+  rule_name: VM snapshot chain depth
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - snapshot_chain_depth
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters:
+    max_snapshot_chain_depth:
+      type: number
+      default: 2
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: snapshot_chain_depth > max_snapshot_chain_depth
+    pass_when: snapshot_chain_depth <= max_snapshot_chain_depth
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: snapshot_chain_depth
+    expected_value: <= 2
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 虚拟机快照链深度
+    check_name_zh: 虚拟机快照链深度
+    finding_title_zh: 虚拟机快照链过深
+    plain_summary_zh: 检查虚拟机快照树深度，用于识别长期叠加快照链风险。
+    failed_summary_zh: 虚拟机快照链深度超过建议阈值，建议尽快合并。
+    false_positive_notes_zh: 变更窗口内短期形成的多级快照可接受，但不应长期保留。
+    exception_guidance_zh: 记录快照用途、负责人和计划删除时间。
+    when_to_ignore_zh: 正在进行受控变更且快照将在窗口内清理时可临时忽略。
+    summary_zh: 过深快照链会增加读写开销和合并失败风险。
+    business_impact_zh: 业务性能和备份稳定性可能受到影响。
+    technical_impact_zh: 多级 redo 日志会增加 I/O 路径复杂度和存储空间增长。
+    consequence_zh: 可能导致虚拟机性能下降、快照删除耗时过长或合并失败。
+    remediation_zh: 核对快照用途，在确认业务正常后删除或合并无用快照。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 确认快照创建原因和业务状态。
+    - 备份或确认回退方案后删除过期快照。
+    - 观察数据存储空间和虚拟机性能。
+  references: *vmware_docs
+  report:
+    section: vm
+    tags:
+    - vm
+    - snapshot
+  scoring:
+    dimension: operations
+    weight: 0.8
+- schema_version: 1.0
+  rule_id: VSL-VM-009
+  rule_name: VM disk provisioning mode
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - nonpersistent_disk_count
+    - disk_provisioning_modes
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: nonpersistent_disk_count > 0
+    pass_when: nonpersistent_disk_count == 0
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: nonpersistent_disk_count
+    expected_value: 0
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 虚拟机磁盘置备模式
+    check_name_zh: 虚拟机磁盘置备模式
+    finding_title_zh: 虚拟机存在非持久化磁盘
+    plain_summary_zh: 检查虚拟机磁盘置备和磁盘模式，用于识别非持久化磁盘配置。
+    failed_summary_zh: 虚拟机存在非持久化磁盘，数据持久性需要确认。
+    false_positive_notes_zh: 实验、缓存或临时计算场景可能有意使用非持久化磁盘。
+    exception_guidance_zh: 记录业务用途、数据持久性要求和负责人确认。
+    when_to_ignore_zh: 磁盘仅存放临时数据且业务方确认可丢弃时可忽略。
+    summary_zh: 非持久化磁盘重启或快照回退后可能丢失写入内容。
+    business_impact_zh: 如果误用于业务数据盘，可能导致数据丢失。
+    technical_impact_zh: independent_nonpersistent 模式不会按普通磁盘方式保留写入变化。
+    consequence_zh: 可能造成应用数据不一致或恢复后数据缺失。
+    remediation_zh: 核对磁盘用途，业务数据盘应调整为持久化模式并验证应用数据。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 查看虚拟机磁盘模式和应用用途。
+    - 与业务方确认数据持久性要求。
+    - 必要时在维护窗口调整磁盘模式并验证业务。
+  references: *vmware_docs
+  report:
+    section: vm
+    tags:
+    - vm
+    - disk
+  scoring:
+    dimension: operations
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-VM-013
+  rule_name: VM NUMA affinity configuration
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - numa_affinity_configured
+    - numa_affinity_nodes
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: numa_affinity_configured == True
+    pass_when: numa_affinity_configured == False
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: numa_affinity_configured
+    expected_value: false
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 虚拟机 NUMA 亲和配置
+    check_name_zh: 虚拟机 NUMA 亲和配置
+    finding_title_zh: 虚拟机配置了 NUMA 节点亲和
+    plain_summary_zh: 检查虚拟机 NUMA 亲和配置，用于识别可能限制调度灵活性的手工绑定。
+    failed_summary_zh: 虚拟机配置了 NUMA 节点亲和，建议确认是否仍有必要。
+    false_positive_notes_zh: 高性能数据库或低延迟业务可能经过压测后固定 NUMA 节点。
+    exception_guidance_zh: 记录性能测试依据、绑定节点和业务负责人。
+    when_to_ignore_zh: 已通过性能压测证明 NUMA 亲和收益明确时可保留。
+    summary_zh: NUMA 亲和配置会限制 ESXi 调度灵活性，可能影响迁移和资源均衡。
+    business_impact_zh: 主机维护或资源变化时，业务调度空间可能变小。
+    technical_impact_zh: 固定 NUMA 节点会限制虚拟机运行位置和调度策略。
+    consequence_zh: 可能导致资源热点、迁移受限或性能调优复杂度增加。
+    remediation_zh: 复核 NUMA 亲和配置的必要性，无明确性能依据时建议移除。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 确认虚拟机是否有 NUMA 亲和配置。
+    - 核对历史性能测试和业务要求。
+    - 非必要场景移除亲和配置并观察性能。
+  references: *vmware_docs
+  report:
+    section: vm
+    tags:
+    - vm
+    - performance
+  scoring:
+    dimension: performance
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-VM-014
+  rule_name: VM VMware Tools install state
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - vmware_tools_installed
+    - tools_install_status
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: vmware_tools_installed == False
+    pass_when: vmware_tools_installed == True
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: vmware_tools_installed
+    expected_value: true
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 虚拟机 VMware Tools 安装状态
+    check_name_zh: 虚拟机 VMware Tools 安装状态
+    finding_title_zh: 虚拟机未安装 VMware Tools
+    plain_summary_zh: 检查虚拟机 VMware Tools 安装状态，用于确认客户机管理能力。
+    failed_summary_zh: 虚拟机未安装 VMware Tools，客户机状态采集和优雅关机能力受限。
+    false_positive_notes_zh: 特殊虚拟设备或不支持 Tools 的系统可能无法安装。
+    exception_guidance_zh: 记录操作系统类型、兼容性限制和替代管理方式。
+    when_to_ignore_zh: 客户机系统不支持 VMware Tools 或为短期临时虚拟机时可忽略。
+    summary_zh: VMware Tools 提供客户机状态、驱动和管理增强能力。
+    business_impact_zh: 运维动作、备份一致性和故障处理效率可能降低。
+    technical_impact_zh: 未安装 Tools 时，vCenter 无法完整获取客户机心跳、IP 和部分驱动能力。
+    consequence_zh: 可能导致优雅关机失败、备份一致性能力下降或状态判断不准确。
+    remediation_zh: 为支持的客户机安装 VMware Tools 或 open-vm-tools，并复核运行状态。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: true
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 确认客户机操作系统类型。
+    - 安装 VMware Tools 或 open-vm-tools。
+    - 验证 Tools 状态和客户机心跳。
+  references: *vmware_docs
+  report:
+    section: vm
+    tags:
+    - vm
+    - tools
+  scoring:
+    dimension: operations
+    weight: 0.8
+- schema_version: 1.0
+  rule_id: VSL-SEC-002
+  rule_name: vCenter administrator permission assignment
+  category: security
+  object_type: vCenter
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - vcenter_admin_account_count
+    - vcenter_admin_principals
+    object_path: inventory.vcenter
+    sampling:
+      required: false
+  parameters:
+    max_vcenter_admin_accounts:
+      type: number
+      default: 5
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: vcenter_admin_account_count > max_vcenter_admin_accounts
+    pass_when: vcenter_admin_account_count <= max_vcenter_admin_accounts
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: vcenter_admin_account_count
+    expected_value: <= 5
+    required_fields: *required_fields
+  report_fields:
+    title_zh: vCenter 管理员权限分配
+    check_name_zh: vCenter 管理员权限分配
+    finding_title_zh: vCenter 管理员权限账号较多
+    plain_summary_zh: 检查 vCenter Administrator 角色分配数量，用于评估最小权限原则执行情况。
+    failed_summary_zh: vCenter 管理员权限账号数量超过建议阈值。
+    false_positive_notes_zh: 大型运维团队可能需要多个管理员组，但建议优先使用受控组而非个人账号。
+    exception_guidance_zh: 记录管理员组职责、审批流程和定期复核周期。
+    when_to_ignore_zh: 已纳入统一身份治理、审批和审计机制时可阶段性忽略。
+    summary_zh: 管理员权限数量过多会增加误操作和越权访问风险。
+    business_impact_zh: 权限审计复杂度增加，安全合规压力上升。
+    technical_impact_zh: Administrator 角色具备广泛操作权限，应严格控制分配范围。
+    consequence_zh: 可能导致未授权变更、审计责任不清或账号滥用。
+    remediation_zh: 复核管理员权限分配，移除不必要账号，优先使用职责分离的角色和组。
+  remediation:
+    owner_role: security_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: true
+    verification_method: manual_check
+    steps_zh:
+    - 导出 vCenter 权限分配清单。
+    - 与运维负责人确认管理员账号必要性。
+    - 移除不必要的 Administrator 角色分配。
+  references: *vmware_docs
+  report:
+    section: security
+    tags:
+    - security
+    - permission
+  scoring:
+    dimension: security
+    weight: 0.5
+- schema_version: 1.0
+  rule_id: VSL-VC-015
+  rule_name: vCenter task backlog
+  category: vcenter
+  object_type: vCenter
+  risk_level: P4
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - task_backlog_count
+    - task_backlog_items
+    object_path: inventory.vcenter
+    sampling:
+      required: false
+  parameters:
+    max_task_backlog_count:
+      type: number
+      default: 20
+      override_allowed: true
+  condition:
+    type: safe_expression
+    fail_when: task_backlog_count > max_task_backlog_count
+    pass_when: task_backlog_count <= max_task_backlog_count
+  severity_policy: *fixed_p4
+  evidence_schema:
+    current_value_path: task_backlog_count
+    expected_value: <= 20
+    required_fields: *required_fields
+  report_fields:
+    title_zh: vCenter 任务积压状态
+    check_name_zh: vCenter 任务积压状态
+    finding_title_zh: vCenter 运行中或排队任务较多
+    plain_summary_zh: 检查 vCenter 近期任务中运行中和排队任务数量，用于识别任务积压。
+    failed_summary_zh: vCenter 存在较多运行中或排队任务，建议关注任务处理状态。
+    false_positive_notes_zh: 大批量迁移、批量开关机或维护窗口内任务增多属于正常现象。
+    exception_guidance_zh: 记录维护窗口、批量操作计划和预计完成时间。
+    when_to_ignore_zh: 正在进行明确的批量维护且任务持续推进时可忽略。
+    summary_zh: 任务积压可能反映 vCenter 处理压力或后台任务异常。
+    business_impact_zh: 管理操作响应时间可能变长，维护任务可能延迟完成。
+    technical_impact_zh: 大量排队或运行中任务会影响 vCenter 调度和运维可见性。
+    consequence_zh: 可能导致任务失败、维护窗口延长或操作反馈滞后。
+    remediation_zh: 查看积压任务详情，确认是否为正常批量操作；异常任务需定位对应对象和服务状态。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: manual_check
+    steps_zh:
+    - 查看 vCenter Recent Tasks 中运行中和排队任务。
+    - 确认是否属于计划内批量操作。
+    - 对长期无进展任务定位对象和相关服务状态。
+  references: *vmware_docs
+  report:
+    section: vcenter
+    tags:
+    - vcenter
+    - operations
+  scoring:
+    dimension: operations
+    weight: 0.5

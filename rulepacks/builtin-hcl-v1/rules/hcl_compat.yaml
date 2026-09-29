@@ -1,0 +1,100 @@
+rules:
+  - &hcl_rule
+    schema_version: 1.0
+    rule_id: VSL-HCL-001
+    rule_name: Controller upgrade compatibility
+    category: upgrade_compatibility
+    object_type: HostPciDevice
+    risk_level: P1
+    confidence_level: high
+    enabled: true
+    rule_version: 1.0.0
+    applicable_versions: [vSphere 7.x, vSphere 8.x, vSphere 9.x]
+    implementation_status: implemented
+    execution_mode: default_enabled
+    capability_required: [hcl_data]
+    report_visibility: [show_in_rule_catalog, show_in_executed_matrix]
+    scoring_eligible: false
+    data_source:
+      type: hcl
+      source_domain: plugin
+      api_paths: []
+      object_path: inventory.host_pci_devices
+    parameters:
+      target_release:
+        type: string
+        default: ESXi 8.0 U3
+        override_allowed: true
+    condition:
+      type: plugin
+      plugin_name: hcl_compatibility
+      not_applicable_when: category != 'controller'
+    severity_policy:
+      type: fixed
+      default_level: P1
+      rules: []
+    evidence_schema:
+      current_value_path: category
+      expected_value: CERTIFIED
+      required_fields: [run_id, rule_id, object_key, object_name, data_quality]
+    report_fields:
+      title_zh: 控制器升级兼容性
+      check_name_zh: 控制器 HCL 认证
+      finding_title_zh: 控制器不满足目标 ESXi 认证
+      plain_summary_zh: 基于本地 HCL 数据检查控制器的驱动和固件认证组合。
+      failed_summary_zh: 控制器当前驱动或固件组合未通过目标版本认证。
+      summary_zh: 控制器需满足目标 ESXi 版本的 HCL 认证组合。
+      business_impact_zh: 不兼容的存储控制器可能造成升级阻塞或升级后的存储访问风险。
+      technical_impact_zh: 驱动或固件组合与 HCL 不一致。
+      consequence_zh: 升级后可能出现设备不可用、性能异常或厂商支持限制。
+      remediation_zh: 按 HCL 认证组合核对驱动和固件，必要时在维护窗口更新并复检。型号标识有歧义时请通过 VCG 链接人工核对。
+    remediation:
+      owner_role: virtualization_admin
+      remediation_effort: high
+      maintenance_window_required: true
+      rollback_required: true
+      verification_method: rerun_rule
+      steps_zh: [核对控制器型号和 PCI 标识, 按 HCL 更新驱动及固件, 复跑兼容性检查]
+    references:
+      - title: Broadcom Compatibility Guide
+        url: https://compatibilityguide.broadcom.com/
+    report: {section: Upgrade Compatibility, tags: [hcl, controller]}
+    scoring: {dimension: upgrade_compatibility, weight: 0.0}
+  - <<: *hcl_rule
+    rule_id: VSL-HCL-002
+    rule_name: NIC upgrade compatibility
+    condition:
+      type: plugin
+      plugin_name: hcl_compatibility
+      not_applicable_when: category != 'nic'
+    report_fields:
+      title_zh: 网卡升级兼容性
+      check_name_zh: 网卡 HCL 认证
+      finding_title_zh: 网卡不满足目标 ESXi 认证
+      plain_summary_zh: 基于本地 HCL 数据检查网卡的驱动和固件认证组合。
+      failed_summary_zh: 网卡当前驱动或固件组合未通过目标版本认证。
+      summary_zh: 网卡需满足目标 ESXi 版本的 HCL 认证组合。
+      business_impact_zh: 不兼容网卡可能影响管理、迁移或业务网络连通性。
+      technical_impact_zh: 驱动或固件组合与 HCL 不一致。
+      consequence_zh: 升级后可能出现链路异常、性能下降或厂商支持限制。
+      remediation_zh: 按 HCL 认证组合核对驱动和固件，必要时在维护窗口更新并复检。固件未采集时请补齐主机或带外固件信息。
+    report: {section: Upgrade Compatibility, tags: [hcl, nic]}
+  - <<: *hcl_rule
+    rule_id: VSL-HCL-003
+    rule_name: Disk upgrade compatibility
+    condition:
+      type: plugin
+      plugin_name: hcl_compatibility
+      not_applicable_when: category not in ['ssd', 'hdd']
+    report_fields:
+      title_zh: 磁盘升级兼容性
+      check_name_zh: 磁盘 HCL 认证
+      finding_title_zh: 磁盘不满足目标 ESXi 认证
+      plain_summary_zh: 基于本地 HCL 数据检查磁盘的驱动和固件认证组合。
+      failed_summary_zh: 磁盘当前驱动或固件组合未通过目标版本认证。
+      summary_zh: 磁盘需满足目标 ESXi 版本的 HCL 认证组合。
+      business_impact_zh: 不兼容磁盘可能影响升级计划和存储可靠性。
+      technical_impact_zh: 磁盘驱动或固件组合与 HCL 不一致。
+      consequence_zh: 升级后可能出现存储告警、性能异常或厂商支持限制。
+      remediation_zh: 按 HCL 核对磁盘型号、驱动和固件。型号标识有歧义是 HCL 型号粒度限制，请通过候选 VCG 链接人工核对；固件未采集时需补齐主机或带外固件信息。
+    report: {section: Upgrade Compatibility, tags: [hcl, disk]}

@@ -1,0 +1,346 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-VM-023
+  rule_name: VM running on local datastore
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: &vsphere_versions
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: &pyvmomi_required
+  - pyvmomi
+  report_visibility: &executed_visibility
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: storage
+    api_paths:
+    - vm_on_local_datastore
+    - local_datastore_names
+    - datastore_names
+    - is_system_vm
+    - local_datastore_collector_source
+    object_path: inventory.vm
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    not_applicable_when: is_system_vm == True
+    fail_when: vm_on_local_datastore == True
+    pass_when: vm_on_local_datastore == False
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: vm_on_local_datastore
+    expected_value: false
+    required_fields: &required_fields
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    title_zh: 虚拟机运行在本地存储上
+    check_name_zh: 虚拟机存储位置状态
+    finding_title_zh: 虚拟机运行在本地存储上
+    plain_summary_zh: 检查业务虚拟机所在 Datastore 是否为本地主机存储，确认关键业务具备迁移和主机故障保护条件。
+    failed_summary_zh: 虚拟机磁盘位于本地 Datastore，需要确认是否符合业务规划。
+    false_positive_notes_zh: 测试虚拟机、临时工具机或明确设计为本地运行的设备可作为例外。
+    exception_guidance_zh: 记录虚拟机用途、保留在本地存储的原因、负责人和复核周期。
+    when_to_ignore_zh: 已确认不需要 vMotion、HA 或集中备份能力的临时虚拟机，可纳入例外清单。
+    summary_zh: 业务虚拟机位于本地存储时，主机故障或维护期间迁移与恢复能力会受到限制。
+    business_impact_zh: 本地存储承载业务虚拟机可能影响维护窗口安排、故障恢复和备份策略一致性。
+    technical_impact_zh: 本地 Datastore 通常仅单主机可见，虚拟机无法直接利用共享存储上的 HA、DRS 或 vMotion 能力。
+    consequence_zh: 如果未按规划使用本地存储，主机故障可能导致虚拟机不可用时间延长。
+    remediation_zh: 建议确认虚拟机业务等级，必要时迁移到符合规划的共享 Datastore，并复核备份和迁移策略。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对虚拟机用途、所在主机和本地 Datastore 名称。
+    - 确认是否需要迁移到共享 Datastore 或纳入例外清单。
+    - 完成迁移或例外确认后复跑巡检。
+  references: &vmware_docs
+  - title: VMware vSphere Documentation
+    url: https://techdocs.broadcom.com/
+  report:
+    section: vm
+    tags:
+    - vm
+    - datastore
+  scoring:
+    dimension: availability
+    weight: 0.8
+- schema_version: 1.0
+  rule_id: VSL-HOST-024
+  rule_name: ESXi host hardware health
+  category: host
+  object_type: HostSystem
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: hardware
+    api_paths:
+    - host_hardware_health_issue_count
+    - host_hardware_health_red_count
+    - host_hardware_health_issues
+    - hardware_health_collector_source
+    object_path: inventory.hosts
+    sampling:
+      required: false
+  parameters: {}
+  condition:
+    type: safe_expression
+    fail_when: host_hardware_health_issue_count > 0
+    pass_when: host_hardware_health_issue_count == 0
+  severity_policy:
+    type: threshold
+    default_level: P3
+    rules:
+    - when: host_hardware_health_red_count > 0
+      level: P2
+    - when: host_hardware_health_issue_count > 0
+      level: P3
+  evidence_schema:
+    current_value_path: host_hardware_health_issue_count
+    expected_value: 0
+    required_fields: *required_fields
+  report_fields:
+    title_zh: ESXi 主机硬件健康状态异常
+    check_name_zh: ESXi 主机硬件健康状态
+    finding_title_zh: ESXi 主机硬件健康状态异常
+    plain_summary_zh: 检查 ESXi 主机硬件传感器和健康摘要，识别电源、风扇、温度、存储控制器等硬件状态风险。
+    failed_summary_zh: 主机硬件健康传感器返回 Yellow 或 Red 状态，需要结合硬件管理平台进一步确认。
+    false_positive_notes_zh: 维护窗口、固件升级或厂商传感器短时波动可能造成短期状态变化。
+    exception_guidance_zh: 记录硬件平台、传感器名称、厂商工单、处理计划和复核时间。
+    when_to_ignore_zh: 已由硬件管理平台确认属于传感器误报且已有厂商说明时，可作为例外记录。
+    summary_zh: 硬件健康问题可能影响主机承载能力和业务可用性，需要优先确认。
+    business_impact_zh: 主机硬件异常可能导致业务虚拟机迁移、性能下降或非计划停机。
+    technical_impact_zh: 电源、风扇、温度或存储控制器异常可能触发主机保护机制或造成硬件故障扩大。
+    consequence_zh: 如果硬件问题未处理，后续可能出现主机隔离、宕机或虚拟机中断风险。
+    remediation_zh: 建议结合 iDRAC、iLO、XClarity 等硬件管理平台复核传感器状态，必要时联系厂商处理。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: false
+    verification_method: manual_check
+    steps_zh:
+    - 核对主机硬件健康传感器和厂商硬件管理平台状态。
+    - 对 Red 状态组件优先安排厂商排查或备件更换。
+    - 处理后确认 vCenter 与硬件管理平台状态恢复正常。
+  references: *vmware_docs
+  report:
+    section: host
+    tags:
+    - host
+    - hardware
+  scoring:
+    dimension: availability
+    weight: 1.0
+- schema_version: 1.0
+  rule_id: VSL-DS-020
+  rule_name: vSAN storage health
+  category: datastore
+  object_type: Datastore
+  risk_level: P3
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: storage
+    api_paths:
+    - datastore_is_vsan
+    - vsan_api_status
+    - vsan_issue_count
+    - vsan_capacity_issue
+    - vsan_cluster_enabled
+    - vsan_health_issue_count
+    - vsan_disk_health_issue_count
+    - vsan_object_health_issue_count
+    - vsan_resync_object_count
+    - vsan_used_percent
+    - vsan_free_gb
+    - datastore_capacity_gb
+    - vsan_collector_source
+    object_path: inventory.datastores
+    sampling:
+      required: false
+  parameters:
+    vsan_used_warning_percent:
+      type: number
+      default: 80
+      override_allowed: true
+  condition:
+    type: safe_expression
+    not_applicable_when: datastore_is_vsan == False
+    unavailable_when: vsan_api_status in ['unsupported', 'unavailable', 'not_collected', 'api_error', 'ssl_error', 'method_not_found', 'permission_denied', 'timeout']
+    fail_when: vsan_api_status == 'collected' and vsan_issue_count > 0
+    pass_when: vsan_api_status == 'collected' and vsan_issue_count == 0
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: vsan_issue_count
+    expected_value: 0
+    required_fields: *required_fields
+  report_fields:
+    title_zh: vSAN 存储健康存在异常
+    check_name_zh: vSAN 存储健康状态
+    finding_title_zh: vSAN 存储健康存在异常
+    plain_summary_zh: 检查 vSAN Datastore 容量水位、集群启用状态、健康摘要、磁盘状态、对象状态和重同步状态。
+    failed_summary_zh: vSAN API 返回容量、集群、磁盘、对象或重同步相关异常，需要结合 vSAN Skyline Health 和客户变更计划复核。
+    false_positive_notes_zh: 短期迁移、重平衡、修复或扩容前临时状态变化时，应结合变更计划确认。
+    exception_guidance_zh: 记录 vSAN 异常来源、影响对象、容量或修复计划、负责人和下一次复核时间。
+    when_to_ignore_zh: 已有明确处理计划且 vSAN 健康项由当前维护窗口触发时，可阶段性作为例外观察。
+    summary_zh: vSAN 存储健康异常可能影响对象合规、重建、故障恢复和运维窗口安全余量。
+    business_impact_zh: vSAN 健康异常可能影响虚拟机写入、策略合规、故障后的重建能力和存储可用性。
+    technical_impact_zh: vSAN 需要保持容量、磁盘组、对象合规和重同步状态在可控范围内，异常项会降低容错余量。
+    consequence_zh: 如果 vSAN 异常持续存在，后续磁盘或主机故障时可能无法完成对象修复或重建。
+    remediation_zh: 建议结合 vSAN Skyline Health、对象合规、磁盘组状态和重同步任务定位异常来源，必要时清理数据、迁移负载或规划扩容。
+  remediation:
+    owner_role: storage_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 核对 vSAN Datastore 容量、增长趋势、集群启用状态和剩余空间。
+    - 检查 vSAN Skyline Health、磁盘组、对象合规和重同步状态。
+    - 按异常来源处理或纳入维护计划后复跑巡检。
+  references: *vmware_docs
+  report:
+    section: datastore
+    tags:
+    - datastore
+    - vsan
+  scoring:
+    dimension: storage
+    weight: 0.8
+- schema_version: 1.0
+  rule_id: VSL-HOST-026
+  rule_name: Host resource allocation overcommit ratio
+  category: host
+  object_type: HostSystem
+  risk_level: P3
+  health_impact: none
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions: *vsphere_versions
+  implementation_status: implemented
+  execution_mode: default_enabled
+  capability_required: *pyvmomi_required
+  report_visibility: *executed_visibility
+  scoring_eligible: true
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - host_resource_overcommit
+    - host_pcpu_count
+    - host_memory_capacity_mb
+    - host_vcpu_allocated
+    - host_memory_allocated_mb
+    - host_vcpu_to_pcpu_ratio
+    - host_memory_allocation_ratio
+    - host_resource_collector_source
+    object_path: inventory.hosts
+    sampling:
+      required: false
+  parameters:
+    host_cpu_overcommit_ratio_warning:
+      type: number
+      default: 4
+      override_allowed: true
+    host_memory_overcommit_ratio_warning:
+      type: number
+      default: 1.5
+      override_allowed: true
+  condition:
+    type: safe_expression
+    unavailable_when: host_vcpu_to_pcpu_ratio is null or host_memory_allocation_ratio is null
+    fail_when: host_vcpu_to_pcpu_ratio >= host_cpu_overcommit_ratio_warning or host_memory_allocation_ratio >= host_memory_overcommit_ratio_warning
+    pass_when: host_vcpu_to_pcpu_ratio < host_cpu_overcommit_ratio_warning and host_memory_allocation_ratio < host_memory_overcommit_ratio_warning
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: host_resource_overcommit
+    expected_value: false
+    required_fields: *required_fields
+  report_fields:
+    title_zh: 主机资源分配比例偏高
+    check_name_zh: 主机资源分配比例
+    finding_title_zh: 主机资源分配比例偏高
+    plain_summary_zh: 汇总主机已分配 vCPU、已分配内存与物理资源的比例，用于提示容量规划复核。
+    failed_summary_zh: 主机 CPU 或内存分配比例超过建议观察阈值，需要结合性能指标和业务负载确认。
+    false_positive_notes_zh: 开发测试、低负载或弹性业务环境可能允许更高分配比例。
+    exception_guidance_zh: 记录超分策略、业务负载类型、监控指标、负责人和复核周期。
+    when_to_ignore_zh: 已有明确容量规划并持续监控 CPU Ready、内存气球和交换指标时，可作为观察项。
+    summary_zh: 资源分配比例偏高会降低容量余量，并增加性能争用风险。
+    business_impact_zh: 业务高峰时资源争用可能导致响应变慢、迁移困难或扩容需求提前出现。
+    technical_impact_zh: 较高 vCPU:pCPU 或内存分配比例会提升调度等待、内存回收和性能波动概率。
+    consequence_zh: 如果容量持续紧张，后续新增业务或主机维护时可用余量会不足。
+    remediation_zh: 建议结合 CPU Ready、内存 balloon/swap、业务峰值和容量增长计划，评估是否需要回收或扩容。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: manual_check
+    steps_zh:
+    - 核对主机物理 CPU、内存容量和虚拟机分配总量。
+    - 结合性能指标确认是否存在资源争用。
+    - 通过资源回收、迁移或扩容降低超分风险。
+  references: *vmware_docs
+  report:
+    section: host
+    tags:
+    - host
+    - capacity
+  scoring:
+    dimension: capacity
+    weight: 0.8

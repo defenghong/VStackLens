@@ -1,0 +1,17 @@
+{
+  "objects": [
+    {
+      "object_type": "VirtualMachine",
+      "object_key": "vm-powered-off",
+      "object_name": "powered-off-vm",
+      "object_path": "Default/mock-vcenter.local/powered-off-vm",
+      "properties": {
+        "snapshot_age_days_max": 0,
+        "power_state": "poweredOff",
+        "tools_running": false,
+        "tools_outdated": false,
+        "iso_mounted": false
+      }
+    }
+  ]
+}

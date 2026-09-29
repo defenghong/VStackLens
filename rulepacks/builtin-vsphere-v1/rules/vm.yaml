@@ -1,0 +1,501 @@
+rules:
+- schema_version: 1.0
+  rule_id: VSL-VM-001
+  rule_name: VM old snapshot
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P1
+  health_impact: attention
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - snapshot_age_days_max
+    object_path: inventory.vms
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: snapshot_age_days_max >= 7
+    pass_when: snapshot_age_days_max < 7
+  severity_policy:
+    type: fixed
+    default_level: P1
+  evidence_schema:
+    current_value_path: snapshot_age_days_max
+    expected_value: < 7
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 虚拟机快照状态
+    finding_title_zh: 虚拟机存在超期快照
+    plain_summary_zh: 检查 虚拟机快照状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机存在超期快照。
+    title_zh: 虚拟机存在超期快照
+    summary_zh: 虚拟机快照保留时间超过阈值。
+    business_impact_zh: 长期快照会占用存储并影响虚拟机性能。
+    technical_impact_zh: 快照链可能持续增长，合并失败风险增加。
+    consequence_zh: 可能导致 Datastore 空间耗尽、虚拟机性能下降或快照合并失败。
+    remediation_zh: 确认快照用途后删除或合并快照。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 确认快照创建人、用途和业务影响
+    - 必要时先完成备份或业务确认
+    - 在维护窗口删除或合并快照并复跑巡检
+  references:
+  - title: VMware snapshot best practices
+    url: https://techdocs.broadcom.com/
+  report:
+    section: VM
+    tags:
+    - snapshot
+  scoring:
+    dimension: capacity
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VM-002
+  rule_name: VMware Tools not running
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P3
+  health_impact: none
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: runtime
+    api_paths:
+    - power_state
+    - tools_running
+    object_path: inventory.vms
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: power_state == 'poweredOn' and tools_running == False
+    pass_when: power_state != 'poweredOn' or tools_running == True
+  severity_policy:
+    type: fixed
+    default_level: P3
+    rules: []
+  evidence_schema:
+    current_value_path: tools_running
+    expected_value: true
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: VMware Tools 运行状态
+    finding_title_zh: VMware Tools 未运行
+    plain_summary_zh: 检查 VMware Tools 运行状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现VMware Tools 未运行。
+    title_zh: VMware Tools 未运行
+    summary_zh: 已开机虚拟机的 VMware Tools 未运行。
+    business_impact_zh: 客户机监控、备份和运维操作可能受到影响。
+    technical_impact_zh: IP 获取、正常关机、备份集成和脚本操作可能不准确。
+    consequence_zh: 可能导致管理操作失败、备份异常或监控数据缺失。
+    remediation_zh: 启动或重新安装 VMware Tools。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 登录客户机检查 VMware Tools 服务
+    - 启动 VMware Tools 服务
+    - 必要时重新安装 VMware Tools 并复跑巡检
+  references:
+  - title: vSphere VM administration
+    url: https://techdocs.broadcom.com/
+  report:
+    section: VM
+    tags:
+    - tools
+  scoring:
+    dimension: operations
+    weight: 0.8
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VM-003
+  rule_name: VMware Tools outdated
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - tools_outdated
+    object_path: inventory.vms
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: tools_outdated == True
+    pass_when: tools_outdated == False
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: tools_outdated
+    expected_value: false
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: VMware Tools 版本状态
+    finding_title_zh: VMware Tools 版本过旧
+    plain_summary_zh: 检查 VMware Tools 版本状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现VMware Tools 版本过旧。
+    title_zh: VMware Tools 版本过旧
+    summary_zh: 虚拟机 VMware Tools 需要升级。
+    business_impact_zh: 兼容性、驱动修复和管理能力可能不足。
+    technical_impact_zh: 客户机驱动和增强组件版本落后。
+    consequence_zh: 可能出现管理操作异常、性能问题或兼容性风险。
+    remediation_zh: 在维护窗口升级 VMware Tools。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: true
+    rollback_required: true
+    verification_method: rerun_rule
+    steps_zh:
+    - 安排虚拟机维护窗口
+    - 升级 VMware Tools
+    - 按需重启客户机并复跑巡检
+  references:
+  - title: vSphere VM administration
+    url: https://techdocs.broadcom.com/
+  report:
+    section: VM
+    tags:
+    - tools
+  scoring:
+    dimension: compatibility
+    weight: 0.5
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VM-004
+  rule_name: VM CPU Ready high
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: performance
+    api_paths:
+    - cpu_ready_percent
+    object_path: inventory.vms
+    sampling:
+      required: true
+      window_minutes: 60
+      statistic: average
+      minimum_samples: 3
+  condition:
+    type: safe_expression
+    fail_when: cpu_ready_percent >= 5
+    pass_when: cpu_ready_percent < 5
+  severity_policy:
+    type: threshold
+    default_level: P2
+    rules:
+    - when: cpu_ready_percent >= 10
+      level: P1
+    - when: cpu_ready_percent >= 5
+      level: P2
+  evidence_schema:
+    current_value_path: cpu_ready_percent
+    expected_value: < 5
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 虚拟机 CPU Ready 状态
+    finding_title_zh: 虚拟机 CPU Ready 过高
+    plain_summary_zh: 检查 虚拟机 CPU Ready 状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机 CPU Ready 过高。
+    title_zh: 虚拟机 CPU Ready 过高
+    summary_zh: 虚拟机 CPU Ready 指标超过阈值。
+    business_impact_zh: 应用响应可能变慢，用户体验下降。
+    technical_impact_zh: 虚拟机等待 CPU 调度的时间过长。
+    consequence_zh: 可能导致业务延迟、批处理变慢或性能投诉。
+    remediation_zh: 检查 vCPU 配置、主机负载和资源争用。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查虚拟机 vCPU 配置是否过大
+    - 检查所在主机负载和 CPU 争用
+    - 迁移虚拟机或调整资源配置后复跑巡检
+  references:
+  - title: vSphere performance
+    url: https://techdocs.broadcom.com/
+  report:
+    section: VM
+    tags:
+    - performance
+  scoring:
+    dimension: performance
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VM-005
+  rule_name: VM memory pressure
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P2
+  health_impact: attention
+  confidence_level: medium
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: performance
+    api_paths:
+    - swap_or_balloon_mb
+    object_path: inventory.vms
+    sampling:
+      required: true
+      window_minutes: 60
+      statistic: average
+      minimum_samples: 3
+  condition:
+    type: safe_expression
+    fail_when: swap_or_balloon_mb >= 512
+    pass_when: swap_or_balloon_mb < 512
+  severity_policy:
+    type: fixed
+    default_level: P2
+    rules: []
+  evidence_schema:
+    current_value_path: swap_or_balloon_mb
+    expected_value: < 512
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 虚拟机内存回收状态
+    finding_title_zh: 虚拟机存在 Swap 或 Balloon 压力
+    plain_summary_zh: 检查 虚拟机内存回收状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机存在 Swap 或 Balloon 压力。
+    title_zh: 虚拟机存在内存压力
+    summary_zh: 虚拟机出现 Swap 或 Balloon 内存。
+    business_impact_zh: 应用性能可能变慢或出现抖动。
+    technical_impact_zh: 虚拟机或宿主机存在内存争用。
+    consequence_zh: 可能导致磁盘 IO 增加、延迟升高和业务响应变慢。
+    remediation_zh: 检查内存分配、主机压力和工作负载分布。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: medium
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 检查主机内存使用率和争用指标
+    - 评估虚拟机内存配置是否合理
+    - 调整内存或迁移工作负载后复跑巡检
+  references:
+  - title: vSphere resource management
+    url: https://techdocs.broadcom.com/
+  report:
+    section: VM
+    tags:
+    - performance
+  scoring:
+    dimension: performance
+    weight: 1.0
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix
+- schema_version: 1.0
+  rule_id: VSL-VM-006
+  rule_name: VM ISO mounted
+  category: vm
+  object_type: VirtualMachine
+  risk_level: P4
+  confidence_level: high
+  enabled: true
+  rule_version: 1.0.0
+  applicable_versions:
+  - vSphere 6.7 legacy
+  - vSphere 7.x
+  - vSphere 8.x
+  - vSphere 9.x
+  data_source:
+    type: pyvmomi
+    source_domain: config
+    api_paths:
+    - iso_mounted
+    object_path: inventory.vms
+    sampling:
+      required: false
+  condition:
+    type: safe_expression
+    fail_when: iso_mounted == True
+    pass_when: iso_mounted == False
+  severity_policy:
+    type: fixed
+    default_level: P4
+    rules: []
+  evidence_schema:
+    current_value_path: iso_mounted
+    expected_value: false
+    required_fields:
+    - run_id
+    - vcenter_id
+    - object_key
+    - object_name
+    - object_path
+    - collected_at
+    - collector_version
+    - rule_version
+    - data_quality
+    - confidence_reason
+  report_fields:
+    check_name_zh: 虚拟机光驱挂载状态
+    finding_title_zh: 虚拟机挂载 ISO 镜像
+    plain_summary_zh: 检查 虚拟机光驱挂载状态，确认配置或运行状态是否符合建议基线。
+    failed_summary_zh: 发现虚拟机挂载 ISO 镜像。
+    title_zh: 虚拟机挂载 ISO 镜像
+    summary_zh: 虚拟机 CD-ROM 连接了 ISO 镜像。
+    business_impact_zh: 可能存在迁移受阻或安全管理风险。
+    technical_impact_zh: 已连接 ISO 可能影响 vMotion、启动行为或介质访问。
+    consequence_zh: 可能导致迁移失败、误启动或遗留介质风险。
+    remediation_zh: 确认用途后断开不再需要的 ISO。
+  remediation:
+    owner_role: virtualization_admin
+    remediation_effort: low
+    maintenance_window_required: false
+    rollback_required: false
+    verification_method: rerun_rule
+    steps_zh:
+    - 确认 ISO 是否仍有业务用途
+    - 断开虚拟机 CD-ROM 挂载
+    - 检查虚拟机配置并复跑巡检
+  references:
+  - title: vSphere VM administration
+    url: https://techdocs.broadcom.com/
+  report:
+    section: VM
+    tags:
+    - operations
+  scoring:
+    dimension: operations
+    weight: 0.3
+  implementation_status: implemented
+  execution_mode: default_enabled
+  scoring_eligible: true
+  report_visibility:
+  - show_in_rule_catalog
+  - show_in_executed_matrix

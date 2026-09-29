@@ -1,0 +1,215 @@
+{
+  "fixture_type": "sanitized_real_log_event_correlation",
+  "parent_dataset_id": "ds-real-20260925T133451Z",
+  "source_log_file": "provided ESXi support bundle: var/run/log/vobd.0.gz",
+  "stable_id": "derived:a6a12a91b62911b5cbcb0c7a",
+  "window_seconds": 3600,
+  "log_samples": [
+    {
+      "source_line_number": 3621,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3621",
+      "timestamp": "2026-08-28T10:21:04.491Z",
+      "interface": "vmnic4",
+      "state": "down"
+    },
+    {
+      "source_line_number": 3622,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3622",
+      "timestamp": "2026-08-28T10:21:04.535Z",
+      "interface": "vmnic4",
+      "state": "down"
+    },
+    {
+      "source_line_number": 3623,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3623",
+      "timestamp": "2026-08-28T10:21:04.580Z",
+      "interface": "vmnic5",
+      "state": "down"
+    },
+    {
+      "source_line_number": 3624,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3624",
+      "timestamp": "2026-08-28T10:21:04.613Z",
+      "interface": "vmnic5",
+      "state": "down"
+    },
+    {
+      "source_line_number": 3632,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3632",
+      "timestamp": "2026-08-28T10:21:05.002Z",
+      "interface": "vmnic4",
+      "state": "down"
+    },
+    {
+      "source_line_number": 3634,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3634",
+      "timestamp": "2026-08-28T10:21:05.002Z",
+      "interface": "vmnic4",
+      "state": "down"
+    },
+    {
+      "source_line_number": 3636,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3636",
+      "timestamp": "2026-08-28T10:21:05.002Z",
+      "interface": "vmnic5",
+      "state": "down"
+    },
+    {
+      "source_line_number": 3638,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L3638",
+      "timestamp": "2026-08-28T10:21:05.002Z",
+      "interface": "vmnic5",
+      "state": "down"
+    },
+    {
+      "source_line_number": 4025,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L4025",
+      "timestamp": "2026-08-28T10:24:12.947Z",
+      "interface": "vmnic4",
+      "state": "up"
+    },
+    {
+      "source_line_number": 4026,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L4026",
+      "timestamp": "2026-08-28T10:24:12.947Z",
+      "interface": "vmnic4",
+      "state": "up"
+    },
+    {
+      "source_line_number": 4027,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L4027",
+      "timestamp": "2026-08-28T10:24:14.001Z",
+      "interface": "vmnic4",
+      "state": "up"
+    },
+    {
+      "source_line_number": 4029,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L4029",
+      "timestamp": "2026-08-28T10:24:14.565Z",
+      "interface": "vmnic5",
+      "state": "up"
+    },
+    {
+      "source_line_number": 4030,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L4030",
+      "timestamp": "2026-08-28T10:24:14.566Z",
+      "interface": "vmnic5",
+      "state": "up"
+    },
+    {
+      "source_line_number": 4031,
+      "log_pointer": "provided-support-bundle:var/run/log/vobd.0.gz#L4031",
+      "timestamp": "2026-08-28T10:24:16.002Z",
+      "interface": "vmnic5",
+      "state": "up"
+    }
+  ],
+  "event_samples": [
+    {
+      "timestamp": "2026-08-28T10:27:03Z",
+      "event_type": "vim.event.EventEx",
+      "event_key": 487709,
+      "object_ids": [
+        "derived:a6a12a91b62911b5cbcb0c7a"
+      ],
+      "message": "Physical NIC vmnic4 linkstate is down",
+      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+    },
+    {
+      "timestamp": "2026-08-28T10:27:03Z",
+      "event_type": "vim.event.EventEx",
+      "event_key": 487710,
+      "object_ids": [
+        "derived:a6a12a91b62911b5cbcb0c7a"
+      ],
+      "message": "Physical NIC vmnic4 linkstate is down",
+      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+    },
+    {
+      "timestamp": "2026-08-28T10:27:03Z",
+      "event_type": "vim.event.EventEx",
+      "event_key": 487711,
+      "object_ids": [
+        "derived:a6a12a91b62911b5cbcb0c7a"
+      ],
+      "message": "Physical NIC vmnic5 linkstate is down",
+      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+    },
+    {
+      "timestamp": "2026-08-28T10:27:03Z",
+      "event_type": "vim.event.EventEx",
+      "event_key": 487712,
+      "object_ids": [
+        "derived:a6a12a91b62911b5cbcb0c7a"
+      ],
+      "message": "Physical NIC vmnic5 linkstate is down",
+      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+    },
+    {
+      "timestamp": "2026-08-28T10:27:04Z",
+      "event_type": "vim.event.EventEx",
+      "event_key": 487806,
+      "object_ids": [
+        "derived:a6a12a91b62911b5cbcb0c7a"
+      ],
+      "message": "Physical NIC vmnic4 linkstate is up",
+      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+    },
+    {
+      "timestamp": "2026-08-28T10:27:04Z",
+      "event_type": "vim.event.EventEx",
+      "event_key": 487807,
+      "object_ids": [
+        "derived:a6a12a91b62911b5cbcb0c7a"
+      ],
+      "message": "Physical NIC vmnic5 linkstate is up",
+      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+    }
+  ],
+  "expected_links": [
+    {
+      "event_key": 487709,
+      "source_line_number": 3632,
+      "time_distance_seconds": 357.998,
+      "interface": "vmnic4",
+      "state": "down"
+    },
+    {
+      "event_key": 487710,
+      "source_line_number": 3632,
+      "time_distance_seconds": 357.998,
+      "interface": "vmnic4",
+      "state": "down"
+    },
+    {
+      "event_key": 487711,
+      "source_line_number": 3636,
+      "time_distance_seconds": 357.998,
+      "interface": "vmnic5",
+      "state": "down"
+    },
+    {
+      "event_key": 487712,
+      "source_line_number": 3636,
+      "time_distance_seconds": 357.998,
+      "interface": "vmnic5",
+      "state": "down"
+    },
+    {
+      "event_key": 487806,
+      "source_line_number": 4027,
+      "time_distance_seconds": 169.999,
+      "interface": "vmnic4",
+      "state": "up"
+    },
+    {
+      "event_key": 487807,
+      "source_line_number": 4031,
+      "time_distance_seconds": 167.998,
+      "interface": "vmnic5",
+      "state": "up"
+    }
+  ],
+  "raw_log_messages_included": false,
+  "credentials_or_ip_addresses_included": false
+}

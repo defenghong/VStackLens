@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vstacklens"
+version = "0.2.8"
+description = "VStackLens local VMware inspection engine and desktop prototype"
+requires-python = ">=3.12"
+dependencies = [
+  "jinja2>=3.1.0",
+  "pydantic>=2.7.0",
+  "python-docx>=1.1.0",
+  "pyvmomi>=9.0",
+  "pyyaml>=6.0.0",
+  "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+]
+desktop = [
+  "PySide6-Essentials==6.7.3",
+]
+package = [
+  "PyInstaller>=6.0.0",
+  "PySide6-Essentials==6.7.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vstacklens = [
+  "db/schema.sql",
+  "defaults/*.json",
+  "assets/icons/*.ico",
+  "assets/icons/*.png",
+  "assets/hcl/*.gz",
+  "reports/templates/*.j2",
+  "collection/scripts/*.ps1",
+]

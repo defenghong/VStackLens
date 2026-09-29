@@ -1,0 +1,7 @@
+{
+  "normal": {"key": "vmkernel", "status": "ok", "lines": ["2026-09-24T00:00:00Z info vmnic0 link up", "2026-09-24T00:00:01Z error APD path failure"]},
+  "permission_denied": {"key": "hostd", "status": "permission_denied", "reason": "permission_denied", "lines": []},
+  "no_logs": {"key": "vpxa", "status": "empty", "lines": []},
+  "oversized": {"key": "vobd", "status": "ok", "lines": ["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"], "truncated": true},
+  "corrupt": {"key": "syslog", "status": "error", "reason": "malformed_response", "lines": []}
+}

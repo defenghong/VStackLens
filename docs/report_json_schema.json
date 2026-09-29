@@ -1,0 +1,403 @@
+{
+  "$defs": {
+    "CustomerInfo": {
+      "properties": {
+        "customer_name": {
+          "title": "Customer Name",
+          "type": "string"
+        },
+        "site_name": {
+          "title": "Site Name",
+          "type": "string"
+        },
+        "project_name": {
+          "default": "VMware 虚拟化平台巡检",
+          "title": "Project Name",
+          "type": "string"
+        },
+        "vcenter": {
+          "title": "Vcenter",
+          "type": "string"
+        }
+      },
+      "required": [
+        "customer_name",
+        "site_name",
+        "vcenter"
+      ],
+      "title": "CustomerInfo",
+      "type": "object"
+    },
+    "EnvironmentSummary": {
+      "properties": {
+        "vcenter_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vcenter Version"
+        },
+        "scope_statement": {
+          "title": "Scope Statement",
+          "type": "string"
+        },
+        "checked_object_total": {
+          "title": "Checked Object Total",
+          "type": "integer"
+        },
+        "result_status_summary": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Result Status Summary",
+          "type": "object"
+        }
+      },
+      "required": [
+        "scope_statement",
+        "checked_object_total"
+      ],
+      "title": "EnvironmentSummary",
+      "type": "object"
+    },
+    "FindingItem": {
+      "properties": {
+        "risk_level": {
+          "title": "Risk Level",
+          "type": "string"
+        },
+        "rule_id": {
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "rule_name": {
+          "title": "Rule Name",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "object_type": {
+          "title": "Object Type",
+          "type": "string"
+        },
+        "object_name": {
+          "title": "Object Name",
+          "type": "string"
+        },
+        "object_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Path"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "current_value": {
+          "default": null,
+          "title": "Current Value"
+        },
+        "expected_value": {
+          "default": null,
+          "title": "Expected Value"
+        },
+        "business_impact": {
+          "default": "",
+          "title": "Business Impact",
+          "type": "string"
+        },
+        "technical_impact": {
+          "default": "",
+          "title": "Technical Impact",
+          "type": "string"
+        },
+        "consequence": {
+          "default": "",
+          "title": "Consequence",
+          "type": "string"
+        },
+        "remediation": {
+          "default": "",
+          "title": "Remediation",
+          "type": "string"
+        },
+        "evidence": {
+          "additionalProperties": true,
+          "title": "Evidence",
+          "type": "object"
+        },
+        "owner_role": {
+          "default": "",
+          "title": "Owner Role",
+          "type": "string"
+        },
+        "remediation_effort": {
+          "default": "",
+          "title": "Remediation Effort",
+          "type": "string"
+        },
+        "maintenance_window_required": {
+          "default": false,
+          "title": "Maintenance Window Required",
+          "type": "boolean"
+        },
+        "verification_method": {
+          "default": "",
+          "title": "Verification Method",
+          "type": "string"
+        },
+        "remediation_steps": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Remediation Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "risk_level",
+        "rule_id",
+        "rule_name",
+        "title",
+        "object_type",
+        "object_name",
+        "status"
+      ],
+      "title": "FindingItem",
+      "type": "object"
+    },
+    "HealthScore": {
+      "properties": {
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "grade": {
+          "title": "Grade",
+          "type": "string"
+        },
+        "explanation": {
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "score",
+        "grade",
+        "explanation"
+      ],
+      "title": "HealthScore",
+      "type": "object"
+    },
+    "RemediationItem": {
+      "properties": {
+        "risk_level": {
+          "title": "Risk Level",
+          "type": "string"
+        },
+        "rule_id": {
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "object_count": {
+          "title": "Object Count",
+          "type": "integer"
+        },
+        "owner_role": {
+          "default": "",
+          "title": "Owner Role",
+          "type": "string"
+        },
+        "effort": {
+          "default": "",
+          "title": "Effort",
+          "type": "string"
+        },
+        "maintenance_window_required": {
+          "default": false,
+          "title": "Maintenance Window Required",
+          "type": "boolean"
+        },
+        "verification_method": {
+          "default": "",
+          "title": "Verification Method",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "risk_level",
+        "rule_id",
+        "title",
+        "object_count"
+      ],
+      "title": "RemediationItem",
+      "type": "object"
+    },
+    "ReportInfo": {
+      "properties": {
+        "report_id": {
+          "title": "Report Id",
+          "type": "string"
+        },
+        "report_title": {
+          "default": "VStackLens VMware 虚拟化巡检报告",
+          "title": "Report Title",
+          "type": "string"
+        },
+        "report_version": {
+          "default": "M2",
+          "title": "Report Version",
+          "type": "string"
+        },
+        "generated_at": {
+          "title": "Generated At",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "template_style": {
+          "default": "business_blue",
+          "title": "Template Style",
+          "type": "string"
+        },
+        "language": {
+          "default": "zh-CN",
+          "title": "Language",
+          "type": "string"
+        }
+      },
+      "required": [
+        "report_id",
+        "generated_at",
+        "run_id"
+      ],
+      "title": "ReportInfo",
+      "type": "object"
+    },
+    "RiskSummary": {
+      "properties": {
+        "P1": {
+          "default": 0,
+          "title": "P1",
+          "type": "integer"
+        },
+        "P2": {
+          "default": 0,
+          "title": "P2",
+          "type": "integer"
+        },
+        "P3": {
+          "default": 0,
+          "title": "P3",
+          "type": "integer"
+        },
+        "P4": {
+          "default": 0,
+          "title": "P4",
+          "type": "integer"
+        },
+        "total": {
+          "default": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "title": "RiskSummary",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "report_info": {
+      "$ref": "#/$defs/ReportInfo"
+    },
+    "customer_info": {
+      "$ref": "#/$defs/CustomerInfo"
+    },
+    "environment_summary": {
+      "$ref": "#/$defs/EnvironmentSummary"
+    },
+    "health_score": {
+      "$ref": "#/$defs/HealthScore"
+    },
+    "risk_summary": {
+      "$ref": "#/$defs/RiskSummary"
+    },
+    "risk_distribution": {
+      "additionalProperties": true,
+      "title": "Risk Distribution",
+      "type": "object"
+    },
+    "asset_inventory": {
+      "additionalProperties": true,
+      "title": "Asset Inventory",
+      "type": "object"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/FindingItem"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "recommendations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Recommendations",
+      "type": "array"
+    },
+    "remediation_plan": {
+      "items": {
+        "$ref": "#/$defs/RemediationItem"
+      },
+      "title": "Remediation Plan",
+      "type": "array"
+    },
+    "appendix": {
+      "additionalProperties": true,
+      "title": "Appendix",
+      "type": "object"
+    }
+  },
+  "required": [
+    "report_info",
+    "customer_info",
+    "environment_summary",
+    "health_score",
+    "risk_summary"
+  ],
+  "title": "ReportData",
+  "type": "object"
+}
