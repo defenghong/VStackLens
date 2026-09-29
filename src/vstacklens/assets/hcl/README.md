@@ -1,1 +1,3 @@
-No Broadcom VMware HCL/VCG datasets are included in this source release. Obtain datasets separately under terms that permit your use before running data-dependent compatibility checks.
+VStackLens includes code for downloading and importing HCL/VCG data. We cannot include the Broadcom VMware data bundles because we do not have permission to redistribute them. The download and import code is included, with links to Broadcom's official data sources.
+
+Obtain data directly from Broadcom through the [vSAN HCL JSON endpoint](https://vvs.broadcom.com/service/vsan/all.json) or follow Broadcom's [VCG database download instructions](https://knowledge.broadcom.com/external/article/405839). VCG downloads require Broadcom client credentials for an authorized environment. Use data under your own Broadcom access and applicable terms, then import it locally.

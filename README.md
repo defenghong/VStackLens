@@ -26,13 +26,20 @@ See available CLI commands with:
 
 ## HCL and VCG data
 
-This repository intentionally does not include Broadcom VMware HCL/VCG data bundles or fixtures derived from them. Those datasets have their own terms. Obtain data directly under authorization that permits your use, then import it locally. Without an authorized dataset, data-dependent compatibility checks can report unavailable; they must not be interpreted as a compatibility pass.
+VStackLens includes code for downloading and importing HCL/VCG data. We cannot include Broadcom VMware data bundles or test fixtures copied from those datasets because we do not have permission to redistribute them. The download and import code is included below, with links to Broadcom's official data sources.
+
+You can obtain data directly from Broadcom through these official channels:
+
+- **vSAN HCL:** [download the JSON data](https://vvs.broadcom.com/service/vsan/all.json); see Broadcom's [HCL download and upload instructions](https://knowledge.broadcom.com/external/article/373209/downloadupload-hcl-data-for-vcf.html).
+- **VCG bundle:** follow Broadcom's [instructions for downloading the VCG database](https://knowledge.broadcom.com/external/article/405839). The VCG download requires Broadcom client credentials for an authorized environment.
+
+Obtain and use the data under your own Broadcom access and applicable terms, then import it locally. Without an authorized local dataset, data-dependent compatibility checks can report unavailable; they must not be interpreted as a compatibility pass.
 
 The bundled VMware PowerCLI and Typst runtimes are also not included. Obtain and provision third-party runtimes under their own terms if you build a desktop package.
 
 ## Tests
 
-The included test fixtures are synthetic or sanitized. Tests requiring vendor HCL/VCG bundles are omitted from this source snapshot.
+The included test fixtures use synthetic or sanitized data. We cannot include vendor data bundles or fixtures copied from them because we do not have permission to redistribute those materials.
 
 ## License
 
