@@ -896,12 +896,16 @@ class PyVmomiCollector:
         quick_stats = getattr(getattr(vm, "summary", None), "quickStats", None)
         cpu_usage_mhz = getattr(quick_stats, "overallCpuUsage", None) if quick_stats else None
         memory_usage_mb = getattr(quick_stats, "hostMemoryUsage", None) if quick_stats else None
-        iso_mounted = any(
-            isinstance(device, vim.vm.device.VirtualCdrom)
-            and getattr(getattr(device, "connectable", None), "connected", False)
-            and bool(getattr(getattr(device, "backing", None), "fileName", None))
+        storage_summary = getattr(getattr(vm, "summary", None), "storage", None)
+        storage_committed_bytes = getattr(storage_summary, "committed", None) if storage_summary else None
+        iso_paths = sorted({
+            str(file_name).strip()
             for device in devices
-        )
+            if isinstance(device, vim.vm.device.VirtualCdrom)
+            and getattr(getattr(device, "connectable", None), "connected", False)
+            and (file_name := getattr(getattr(device, "backing", None), "fileName", None))
+        })
+        iso_mounted = bool(iso_paths)
         return {
             "object_type": "VirtualMachine",
             "object_key": str(vm._moId),
@@ -921,7 +925,10 @@ class PyVmomiCollector:
                 "swap_or_balloon_mb": perf.metric(vm, "swap_or_balloon_mb") if perf else None,
                 "cpu_usage_mhz": int(cpu_usage_mhz) if isinstance(cpu_usage_mhz, (int, float)) else None,
                 "memory_usage_mb": int(memory_usage_mb) if isinstance(memory_usage_mb, (int, float)) else None,
+                "storage_committed_bytes": int(storage_committed_bytes) if isinstance(storage_committed_bytes, (int, float)) else None,
                 "iso_mounted": iso_mounted,
+                "iso_paths": iso_paths,
+                "is_template": bool(config.template) if config is not None and getattr(config, "template", None) is not None else None,
                 "cpu_reservation_mhz": cpu_reservation_mhz,
                 "memory_reservation_mb": memory_reservation_mb,
                 "vm_reservation_too_high": self._vm_reservation_too_high(

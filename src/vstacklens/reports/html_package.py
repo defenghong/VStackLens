@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from vstacklens.db.repositories import actionable_risk_total
+from vstacklens.reports.presentation import append_report_sentence, count_excluded_powered_off_vms, powered_off_exclusion_note
 from vstacklens.reports.html_assets import REPORT_JS, SINGLE_PAGE_REPORT_JS
 from vstacklens.reports.report_model import ReportData
 
@@ -87,7 +88,14 @@ class HtmlReportPackageBuilder:
                 "vsan": self._single_page_vsan(name, hosts, stores, vsan_summary) if is_vsan else None,
             })
 
-        issues = self._single_page_issues(customer_data.get("findings", []), records)
+        powered_off_note = powered_off_exclusion_note(
+            count_excluded_powered_off_vms((asset_inventory.get("details") or {}).get("VirtualMachine", []))
+        )
+        issues = self._single_page_issues(
+            customer_data.get("findings", []),
+            records,
+            powered_off_note=powered_off_note,
+        )
         visible_risk_counts = {level: sum(item["level"] == level for item in issues) for level in ("P1", "P2", "P3")}
         priority = next((level for level in ("P1", "P2", "P3") if visible_risk_counts[level] > 0), "")
         timing = report_context.get("run_timing") or {}
@@ -521,7 +529,13 @@ class HtmlReportPackageBuilder:
         days = int(match.group(1))
         return -days if "已过期" in text and days > 0 else days
 
-    def _single_page_issues(self, findings: list[dict[str, Any]], records: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    def _single_page_issues(
+        self,
+        findings: list[dict[str, Any]],
+        records: dict[str, list[dict[str, Any]]],
+        *,
+        powered_off_note: str = "",
+    ) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for item in findings:
             level = str(item.get("risk_level") or "").upper()
@@ -571,6 +585,8 @@ class HtmlReportPackageBuilder:
                 objects.append({"name": name, "location": self._single_page_label(location)})
             objects.sort(key=lambda item: (item["name"], item["location"]))
             copy = self._single_page_problem_copy(title, len(objects), items)
+            if _rule_id == "VSL-VM-018" and powered_off_note:
+                copy["current"] = append_report_sentence(copy.get("current"), powered_off_note)
             output.append({"level": level, "title": title, "objects": objects, **copy})
         level_order = {"P1": 0, "P2": 1, "P3": 2}
         visible = [item for item in output if not any(hidden in item["title"].casefold() for hidden in ("vmware tools", "syslog"))]
@@ -1136,6 +1152,7 @@ class HtmlReportPackageBuilder:
         if not text:
             return ""
         replacements = {
+            "TSM-SSH": "SSH",
             "VM 配置资源限制 Limit": "VM 配置资源限制",
             "虚拟机配置了资源 Limit": "虚拟机配置了资源限制",
             "CPU/Memory limit": "CPU/内存资源限制",

@@ -120,7 +120,10 @@ def test_productized_ui_exposes_dashboard_risk_report_and_planned_boundaries() -
     window.go_to_module("report_center")
     app.processEvents()
     buttons = window.pages.currentWidget().findChildren(QPushButton)
-    assert not any("PDF" in button.text() or "PPT" in button.text() for button in buttons)
+    pdf_buttons = [button for button in buttons if button.text() == "打开 PDF 报告"]
+    assert pdf_buttons
+    assert all(button.isEnabled() is False for button in pdf_buttons)
+    assert not any("PPT" in button.text() for button in buttons)
     assert window.report_word_button.text() == "打开 Word 报告"
 
 
@@ -497,7 +500,7 @@ def test_close_event_requests_cooperative_cancel(monkeypatch: pytest.MonkeyPatch
     window.close()
 
 
-def test_report_center_does_not_show_pdf_ppt_capabilities() -> None:
+def test_report_center_exposes_pdf_reader_but_not_ppt_capability() -> None:
     app = _app()
     configure_chinese_font(app)
     window = MainWindow()
@@ -508,7 +511,9 @@ def test_report_center_does_not_show_pdf_ppt_capabilities() -> None:
     buttons = {button.text(): button for button in window.pages.currentWidget().findChildren(QPushButton)}
     labels = "\n".join(label.text() for label in window.pages.currentWidget().findChildren(QLabel))
 
-    assert not any("PDF" in text or "PPT" in text for text in buttons)
+    assert "打开 PDF 报告" in buttons
+    assert buttons["打开 PDF 报告"].isEnabled() is False
+    assert not any("PPT" in text for text in buttons)
     assert "PDF" not in labels
     assert "PPT" not in labels
     window.close()

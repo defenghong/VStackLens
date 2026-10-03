@@ -9,6 +9,7 @@ description = "VStackLens local VMware inspection engine and desktop prototype"
 requires-python = ">=3.12"
 dependencies = [
   "jinja2>=3.1.0",
+  "PyMuPDF==1.28.2",
   "pydantic>=2.7.0",
   "python-docx>=1.1.0",
   "pyvmomi>=9.0",

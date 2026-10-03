@@ -1,8 +1,10 @@
 from vstacklens.reports.presentation import (
+    count_excluded_powered_off_vms,
     build_risk_group_summary,
     execution_status,
     mask_username,
     object_type_label,
+    powered_off_exclusion_note,
     rule_catalog_summary,
     rule_category_label,
 )
@@ -44,3 +46,17 @@ def test_mask_username() -> None:
     assert mask_username("administrator@vsphere.local") == "admi****@vsphere.local"
     assert mask_username("root") == "ro****"
     assert mask_username(None) == "未采集"
+
+
+def test_powered_off_exclusion_note_counts_only_off_templates_and_system_vms() -> None:
+    rows = [
+        {"properties": {"power_state": "poweredOff", "is_template": True, "is_system_vm": False}},
+        {"properties": {"power_state": "poweredOff", "is_template": False, "is_system_vm": True}},
+        {"properties": {"power_state": "poweredOff", "is_template": False, "is_system_vm": False}},
+        {"properties": {"power_state": "poweredOn", "is_template": True, "is_system_vm": False}},
+    ]
+
+    count = count_excluded_powered_off_vms(rows)
+
+    assert count == 2
+    assert powered_off_exclusion_note(count) == "另有 2 台关机的模板或系统虚拟机，不计入。"

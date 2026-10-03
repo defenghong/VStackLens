@@ -292,7 +292,7 @@ def test_desktop_defaults_use_local_app_data_and_builtin_rulepack(monkeypatch, t
 
 def test_desktop_config_defaults_to_simple_vcenter_connection() -> None:
     config = DesktopInspectionConfig(
-        vcenter="10.240.0.10",
+        vcenter="10.0.0.10",
         username="administrator@vsphere.local",
         password="secret",
         port=9443,
@@ -300,7 +300,7 @@ def test_desktop_config_defaults_to_simple_vcenter_connection() -> None:
         rulepack_path=RULEPACK,
     ).normalized()
 
-    assert config.vcenter == "10.240.0.10"
+    assert config.vcenter == "10.0.0.10"
     assert config.port == 443
     assert config.ssl_no_verify is False
 
@@ -1212,8 +1212,9 @@ def test_report_center_reads_new_old_and_incomplete_report_packages(monkeypatch,
     assert result.report_dir in dirs
     current_items = [item for item in items if item.report_dir == result.report_dir]
     assert len(current_items) == 1
-    assert current_items[0].report_type == "HTML · Word"
+    assert current_items[0].report_type == "HTML · Word · PDF"
     assert current_items[0].report_path == result.report_path
+    assert (result.report_dir / "VStackLens-PDF-Report.pdf").is_file()
     assert service._report_item_path_key(current_items[0]) == str(result.report_dir.resolve()).casefold()
     assert old_dir not in dirs
     assert clean_dir in dirs

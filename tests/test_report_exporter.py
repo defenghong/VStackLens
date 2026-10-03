@@ -11,13 +11,15 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 
-from vstacklens.application.inspection_runner import InspectionRunner, VCenterRunRequest
+from vstacklens.application.inspection_runner import InspectionRunner, MockRunRequest, VCenterRunRequest
 from vstacklens.cli import cmd_run_mock
 from vstacklens.collection.mock_collector import MockCollector
 from vstacklens.db.connection import connect
 from vstacklens.reports.docx_report import DocxReportEngine
 from vstacklens.reports.exporter import ReportExportEngine
 from vstacklens.reports.html_report import HtmlReportEngine
+from vstacklens.reports.html_package import HtmlReportPackageBuilder
+from vstacklens.reports.pdf_report import PdfReportEngine
 from vstacklens.findings.evidence_builder import EvidenceBuilder
 from vstacklens.reports.report_model import (
     CustomerInfo,
@@ -390,7 +392,7 @@ def table_layout_report() -> ReportData:
                 rule_name="ESXi version mismatch",
                 title="ESXi 主机版本不一致",
                 object_type="HostSystem",
-                object_name="esxi-01.lab.local-10.240.4.15",
+                object_name="esxi-01.lab.local-172.16.10.15",
                 status="open",
                 current_value="ESXi-8.0.3-build-24585383-with-extra-long-build-description",
                 expected_value="与集群内主机版本保持一致",
@@ -754,6 +756,106 @@ def test_docx_summary_counts_grouped_issues_separately_from_object_details(tmp_p
     assert "完整对象清单建议在 HTML 报告中查看" in text
 
 
+def test_docx_merges_expired_and_deep_snapshots_into_one_p1_problem(tmp_path: Path) -> None:
+    report = rich_report().model_copy(deep=True)
+    report.findings = []
+    for index in range(14):
+        report.findings.append(FindingItem(
+            risk_level="P1",
+            rule_id="VSL-VM-001",
+            rule_name="虚拟机存在超期快照",
+            title="虚拟机存在超期快照",
+            object_type="VirtualMachine",
+            object_name=f"vm-{index:02d}",
+            object_path=f"vcsa.test.local / Cluster-A / vm-{index:02d}",
+            status="failed",
+            business_impact="长期快照可能影响性能。",
+            observed_detail={"snapshots": [{"name": f"snapshot-{index:02d}", "age_days": 120}]},
+        ))
+    for index in range(3):
+        report.findings.append(FindingItem(
+            risk_level="P3",
+            rule_id="VSL-VM-007",
+            rule_name="虚拟机快照链过深",
+            title="虚拟机快照链过深",
+            object_type="VirtualMachine",
+            object_name=f"vm-{index:02d}",
+            object_path=f"vcsa.test.local / Cluster-A / vm-{index:02d}",
+            status="failed",
+            business_impact="过深快照链可能影响备份。",
+            observed_detail={"snapshots": [{"name": f"snapshot-{index:02d}", "chain_depth": 4}]},
+        ))
+
+    engine = DocxReportEngine()
+    groups = engine._customer_visible_risk_groups(engine._aggregate_risks(report))
+    snapshots = [group for group in groups if "快照" in group.title]
+
+    assert len(snapshots) == 1
+    assert snapshots[0].title == "虚拟机存在快照"
+    assert snapshots[0].level == "P1"
+    assert len(snapshots[0].findings) == 14
+    assert engine._risk_counts(report, groups) == {"P1": 1, "P2": 0, "P3": 0}
+    output, _, _ = ReportExportEngine().render(report, tmp_path / "snapshot-merged.docx")
+    text = docx_text(output)
+    assert "虚拟机存在快照" in text
+    assert "虚拟机快照链过深" not in text
+    assert "超期快照或过深快照链" in text
+
+
+def test_docx_powered_off_problem_explains_excluded_templates(tmp_path: Path) -> None:
+    report = rich_report().model_copy(deep=True)
+    report.findings = [FindingItem(
+        risk_level="P3",
+        rule_id="VSL-VM-018",
+        rule_name="存在关机的虚拟机",
+        title="存在关机的虚拟机",
+        object_type="VirtualMachine",
+        object_name="vm-06",
+        status="failed",
+        business_impact="环境中存在关机的虚拟机。",
+    )]
+    report.asset_inventory["details"]["VirtualMachine"] = [
+        {
+            "object_name": f"vm-{index:02d}",
+            "properties": {
+                "power_state": "poweredOff",
+                "is_template": index < 6,
+                "is_system_vm": False,
+            },
+        }
+        for index in range(15)
+    ]
+
+    output, _, _ = ReportExportEngine().render(report, tmp_path / "powered-off-scope.docx")
+    text = docx_text(output)
+    detail = find_table_with_headers(output, ["虚拟机名称", "当前电源状态", "建议处理"])
+
+    assert "另有 6 台关机的模板或系统虚拟机，不计入。" in text
+    assert detail.rows[1].cells[1].text.strip() == "关机"
+    assert "poweredOff" not in " ".join(cell.text for row in detail.rows for cell in row.cells)
+    assert "未采集天" not in " ".join(cell.text for row in detail.rows for cell in row.cells)
+
+
+def test_docx_customer_text_replaces_internal_tsm_ssh_service_name(tmp_path: Path) -> None:
+    report = rich_report().model_copy(deep=True)
+    report.findings = [FindingItem(
+        risk_level="P3",
+        rule_id="VSL-HOST-019",
+        rule_name="ESXi 主机 SSH 服务已开启",
+        title="ESXi 主机 SSH 服务已开启",
+        object_type="HostSystem",
+        object_name="esxi-01",
+        status="failed",
+        remediation="停止 TSM-SSH 服务，并复核主机服务状态。",
+    )]
+
+    output, _, _ = ReportExportEngine().render(report, tmp_path / "ssh-service.docx")
+    text = docx_text(output)
+
+    assert "TSM-SSH" not in text
+    assert "停止 SSH 服务" in text
+
+
 def test_docx_customer_report_hides_p4_items(tmp_path: Path) -> None:
     rendered_path, _, _ = ReportExportEngine().render(rich_report(), tmp_path / "report.docx")
     text = docx_text(rendered_path)
@@ -1108,6 +1210,7 @@ def test_docx_vsan_object_and_disk_issue_details_are_not_truncated(tmp_path: Pat
     visible = docx_text(rendered_path)
     assert "vsan-object-11" in visible and "object-detail-11" in visible
     assert "naa-issue-11" in visible and "disk-detail-11" in visible
+    assert "未取得或未确认的数据不按正常处理" in visible
 
 
 def test_docx_legacy_pnic_evidence_labels_host_level_switch_mapping(tmp_path: Path) -> None:
@@ -1327,6 +1430,46 @@ def test_run_mock_docx_out_generates_docx_and_report_row(tmp_path: Path) -> None
     assert docx_rows
     assert docx_rows[0]["report_status"] == "success"
     assert Path(docx_rows[0]["file_path"]) == docx_out
+
+
+@pytest.mark.parametrize("failed_format", ["html", "word", "pdf"])
+def test_runner_keeps_other_report_formats_when_one_export_fails(monkeypatch, tmp_path: Path, failed_format: str) -> None:
+    error_text = f"{failed_format} simulated failure"
+    if failed_format == "html":
+        monkeypatch.setattr(HtmlReportPackageBuilder, "render", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(error_text)))
+    elif failed_format == "word":
+        monkeypatch.setattr(ReportExportEngine, "render", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(error_text)))
+    else:
+        monkeypatch.setattr(PdfReportEngine, "render", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(error_text)))
+
+    report_dir = tmp_path / "report-package"
+    request = MockRunRequest(
+        db_path=tmp_path / "run.db",
+        rulepack_path=RULEPACK,
+        report_dir=report_dir,
+        fixture_path=FIXTURE,
+        customer_name="测试客户",
+        site_name="测试站点",
+        docx_out=report_dir / "VStackLens-Word-Report.docx",
+        pdf_out=report_dir / "VStackLens-PDF-Report.pdf",
+    )
+
+    result = InspectionRunner().run_mock(request)
+
+    assert (result.html_error is not None) is (failed_format == "html")
+    assert (result.docx_error is not None) is (failed_format == "word")
+    assert (result.pdf_error is not None) is (failed_format == "pdf")
+    assert (result.report_path.is_file()) is (failed_format != "html")
+    assert (result.docx_path is not None and result.docx_path.is_file()) is (failed_format != "word")
+    assert (result.pdf_path is not None and result.pdf_path.is_file()) is (failed_format != "pdf")
+    with connect(request.db_path) as conn:
+        statuses = {row["report_type"]: row["report_status"] for row in conn.execute(
+            "SELECT report_type, report_status FROM reports WHERE run_id = ?",
+            (result.run_id,),
+        )}
+    assert statuses["html_package"] == ("failed" if failed_format == "html" else "success")
+    assert statuses["docx"] == ("failed" if failed_format == "word" else "success")
+    assert statuses["pdf"] == ("failed" if failed_format == "pdf" else "success")
 
 
 def test_run_vcenter_sdk_path_docx_out_generates_docx(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

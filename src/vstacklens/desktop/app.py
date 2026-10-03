@@ -1318,15 +1318,18 @@ class MainWindow(QMainWindow):
         self.report_copy_path_button.clicked.connect(self._copy_selected_report_path)
         self.report_word_button = QPushButton("打开 Word 报告")
         self.report_word_button.clicked.connect(self._open_selected_word_report)
+        self.report_pdf_button = QPushButton("打开 PDF 报告")
+        self.report_pdf_button.clicked.connect(self._open_selected_pdf_report)
         self.delete_report_button = QPushButton("从列表移除")
         self.delete_report_button.clicked.connect(self._remove_selected_report)
         self.delete_report_button.setToolTip("仅从报告中心隐藏选中项，不删除报告文件、巡检记录或资产快照。")
-        for button in (self.report_word_button, self.delete_report_button):
+        for button in (self.report_word_button, self.report_pdf_button, self.delete_report_button):
             button.setEnabled(False)
         open_row.addWidget(self.open_selected_report_button)
         open_row.addWidget(self.open_selected_dir_button)
         open_row.addWidget(self.report_copy_path_button)
         open_row.addWidget(self.report_word_button)
+        open_row.addWidget(self.report_pdf_button)
         open_row.addWidget(self.delete_report_button)
         right.layout.addLayout(open_row)
         roadmap = muted_label("“从列表移除”不会删除文件；仅已识别为本工具产物的报告会出现在此处。")
@@ -2419,18 +2422,20 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.cancel_inspection_button.setEnabled(False)
         self.cancel_inspection_button.hide()
-        self.open_report_button.setEnabled(True)
+        self.open_report_button.setEnabled(result.report_path.exists())
         self.open_word_button.setEnabled(bool(result.docx_path and result.docx_path.exists()))
         self.open_pdf_button.setEnabled(bool(result.pdf_path and result.pdf_path.exists()))
         self.open_dir_button.setEnabled(True)
         self.progress_bar.setValue(100)
         self.stage_label.setText("健康评估完成")
-        generated = ["HTML 报告包"]
+        generated = []
+        if result.report_path.exists():
+            generated.append("HTML 报告包")
         if result.pdf_path and result.pdf_path.exists():
             generated.append("PDF 报告")
         if result.docx_path and result.docx_path.exists():
             generated.append("Word 报告")
-        self.status_label.setText("巡检完成，已生成" + "、".join(generated) + "。")
+        self.status_label.setText("巡检完成，已生成" + "、".join(generated) + "。" if generated else "巡检完成，但报告文件均未生成。")
         risk_total = actionable_risk_total(result.risk_summary)
         optimization_total = int(result.risk_summary.get("P4", 0) or 0)
         summary_lines = [
@@ -2438,8 +2443,11 @@ class MainWindow(QMainWindow):
             f"健康状态：{self.service._health_status(result.score, result.risk_summary)}",
             f"风险总数：{risk_total}",
             f"优化建议：{optimization_total}",
-            f"HTML 报告：{result.report_path}",
         ]
+        if result.report_path.exists():
+            summary_lines.append(f"HTML 报告：{result.report_path}")
+        elif result.html_error:
+            summary_lines.append(result.html_error)
         if result.docx_path:
             summary_lines.append(f"Word 报告：{result.docx_path}")
         elif result.docx_error:
@@ -2819,6 +2827,7 @@ class MainWindow(QMainWindow):
             self.open_selected_dir_button.setEnabled(False)
             self.report_copy_path_button.setEnabled(False)
             self.report_word_button.setEnabled(False)
+            self.report_pdf_button.setEnabled(False)
             self.delete_report_button.setEnabled(False)
         elif self.report_list.currentRow() < 0:
             self.report_list.setCurrentRow(0)
@@ -3550,6 +3559,7 @@ class MainWindow(QMainWindow):
             self.open_selected_dir_button.setEnabled(False)
             self.report_copy_path_button.setEnabled(False)
             self.report_word_button.setEnabled(False)
+            self.report_pdf_button.setEnabled(False)
             self.delete_report_button.setEnabled(False)
             return
         self.open_selected_report_button.setEnabled(bool(item.report_path))
@@ -3557,6 +3567,7 @@ class MainWindow(QMainWindow):
         self.open_selected_dir_button.setEnabled(item.report_dir.exists())
         self.report_copy_path_button.setEnabled(True)
         self.report_word_button.setEnabled(self._word_report_path_for_item(item) is not None)
+        self.report_pdf_button.setEnabled(self._pdf_report_path_for_item(item) is not None)
         self.delete_report_button.setEnabled(True)
         if self._is_log_report_item(item):
             assets = item.asset_summary
@@ -3650,8 +3661,12 @@ class MainWindow(QMainWindow):
         self.rulepack_validation_result.show()
 
     def _open_current_report(self) -> None:
-        if self.current_result:
+        if not self.current_result:
+            return
+        if self.current_result.report_path.exists():
             self._open_path_safe(self.current_result.report_path)
+            return
+        QMessageBox.information(self, "HTML 报告未生成", self.current_result.html_error or "当前巡检未生成 HTML 报告。")
 
     def _open_current_word_report(self) -> None:
         if not self.current_result:
@@ -3701,6 +3716,14 @@ class MainWindow(QMainWindow):
             self._open_path_safe(word_path)
             return
         QMessageBox.information(self, "Word 报告未生成", "当前报告目录中没有可打开的 Word 报告。")
+
+    def _open_selected_pdf_report(self) -> None:
+        item = self._selected_report_item()
+        pdf_path = self._pdf_report_path_for_item(item) if item else None
+        if pdf_path:
+            self._open_path_safe(pdf_path)
+            return
+        QMessageBox.information(self, "PDF 报告未生成", "当前报告目录中没有可打开的 PDF 报告。")
 
     def _open_selected_history_dir(self) -> None:
         item = self._selected_report_item()
@@ -3772,6 +3795,17 @@ class MainWindow(QMainWindow):
                 return candidate
         return None
 
+    def _pdf_report_path_for_item(self, item: ReportCenterItem | None) -> Path | None:
+        if item is None:
+            return None
+        if item.report_path and item.report_path.suffix.lower() == ".pdf" and item.report_path.exists():
+            return item.report_path
+        for candidate in self._report_items:
+            if candidate.report_path and candidate.report_path.suffix.lower() == ".pdf" and candidate.report_dir == item.report_dir and candidate.report_path.exists():
+                return candidate.report_path
+        direct = item.report_dir / "VStackLens-PDF-Report.pdf"
+        return direct if direct.is_file() else None
+
     def _is_log_report_item(self, item: ReportCenterItem) -> bool:
         return item.report_type in {
             "日志分析 HTML 报告",
@@ -3805,6 +3839,10 @@ class MainWindow(QMainWindow):
             target = Path(path)
             if target.is_dir():
                 self.service.open_report_dir(target)
+            elif target.suffix.casefold() == ".pdf":
+                from vstacklens.desktop.pdf_reader import PdfReaderDialog
+
+                PdfReaderDialog(target, self).exec()
             else:
                 self.service.open_report(target)
         except Exception as exc:

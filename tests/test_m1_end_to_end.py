@@ -167,7 +167,7 @@ M2E2_BACKFILL_RULE_IDS = {
 
 CURRENT_RULE_COUNT = 67
 MOCK_FAIL_FINDING_COUNT = 57
-MOCK_FAIL_ACTIONABLE_FINDING_COUNT = 36
+MOCK_FAIL_ACTIONABLE_FINDING_COUNT = 38
 
 PROMOTED_RULE_IDS = M2A_RULE_IDS | M2B1_RULE_IDS | M2E_BACKFILL_RULE_IDS | M2E2_BACKFILL_RULE_IDS
 
@@ -227,7 +227,7 @@ def test_mock_pipeline_persists_summary_report_and_findings(tmp_path: Path) -> N
         assert run["run_status"] == "success"
         assert run["current_stage"] == "success"
         assert run["score"] == 15
-        assert json.loads(run["risk_summary_json"]) == {"P1": 9, "P2": 11, "P3": 16, "P4": 21}
+        assert json.loads(run["risk_summary_json"]) == {"P1": 9, "P2": 11, "P3": 18, "P4": 19}
         assert scalar(conn, "SELECT COUNT(*) FROM reports WHERE run_id = ?", (run_id,)) == 2
         report_types = {
             row["report_type"]
@@ -271,9 +271,9 @@ def test_finding_exception_is_recorded_and_excluded_from_score(tmp_path: Path) -
         context = ReportContextBuilder().build(conn, run_id)
 
     assert before["score"] == 15
-    assert json.loads(before["risk_summary_json"]) == {"P1": 9, "P2": 11, "P3": 16, "P4": 21}
+    assert json.loads(before["risk_summary_json"]) == {"P1": 9, "P2": 11, "P3": 18, "P4": 19}
     assert after["score"] == 15
-    assert json.loads(after["risk_summary_json"]) == {"P1": 8, "P2": 11, "P3": 16, "P4": 21}
+    assert json.loads(after["risk_summary_json"]) == {"P1": 8, "P2": 11, "P3": 18, "P4": 19}
     assert exception["exception_reason"] == "专用隔离集群，客户确认不要求在线迁移。"
     assert exception["owner"] == "virtualization_admin"
     assert len(context["exception_findings"]) == 1
@@ -662,7 +662,12 @@ def test_m2e2_backfilled_rules_have_real_semantics_and_customer_values(tmp_path:
                 (missing_run, *sorted(M2E2_BACKFILL_RULE_IDS)),
             )
         }
-        assert missing_ids == M2E2_BACKFILL_RULE_IDS
+        assert missing_ids == M2E2_BACKFILL_RULE_IDS - {"VSL-VM-018"}
+        vm_power_status = conn.execute(
+            "SELECT result_status FROM rule_results WHERE run_id = ? AND rule_id = 'VSL-VM-018'",
+            (missing_run,),
+        ).fetchone()
+        assert vm_power_status["result_status"] == "passed"
         assert scalar(conn, "SELECT COUNT(*) FROM findings WHERE last_seen_run_id = ?", (missing_run,)) == 0
 
 

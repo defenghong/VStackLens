@@ -347,10 +347,10 @@ rules:
     weight: 0.8
 - schema_version: 1.0
   rule_id: VSL-VM-018
-  rule_name: VM powered off duration
+  rule_name: VM powered off
   category: vm
   object_type: VirtualMachine
-  risk_level: P4
+  risk_level: P3
   confidence_level: medium
   enabled: true
   rule_version: 1.0.0
@@ -364,42 +364,38 @@ rules:
     type: pyvmomi
     source_domain: runtime
     api_paths:
-    - powered_off_days
     - power_state
+    - is_template
+    - is_system_vm
     object_path: inventory.vm
     sampling:
       required: false
-  parameters:
-    max_powered_off_days:
-      type: number
-      default: 90
-      override_allowed: true
   condition:
     type: safe_expression
-    fail_when: powered_off_days > max_powered_off_days
-    pass_when: powered_off_days <= max_powered_off_days
+    fail_when: power_state == "poweredOff" and is_template == False and is_system_vm == False
+    pass_when: power_state != "poweredOff" or is_template == True or is_system_vm == True
   severity_policy:
     type: fixed
-    default_level: P4
+    default_level: P3
     rules: []
   evidence_schema:
-    current_value_path: powered_off_days
-    expected_value: <= 90
+    current_value_path: power_state
+    expected_value: poweredOn
     required_fields: *required_fields
   report_fields:
-    title_zh: 虚拟机长期关机
-    check_name_zh: 虚拟机关机持续时间
-    finding_title_zh: 虚拟机长期关机
-    plain_summary_zh: 检查虚拟机关机持续时间，识别长期未使用但仍占用资源或管理成本的对象。
-    failed_summary_zh: 虚拟机关机持续时间超过建议阈值，需要确认保留必要性。
+    title_zh: 存在关机的虚拟机
+    check_name_zh: 虚拟机电源状态
+    finding_title_zh: 存在关机的虚拟机
+    plain_summary_zh: 检查虚拟机电源状态，识别当前处于关机状态的虚拟机。
+    failed_summary_zh: 环境中存在关机的虚拟机，建议确认虚拟机是否仍在使用，如无需求可进行删除，进行资源回收。
     false_positive_notes_zh: 灾备预留、模板化准备或按计划停用的虚拟机可能长期关机。
     exception_guidance_zh: 记录业务确认人、保留原因、复核周期和预计清理时间。
     when_to_ignore_zh: 已明确作为保留系统、审计留存或灾备对象时，可纳入例外清单定期复核。
-    summary_zh: 长期关机虚拟机可能占用存储空间、备份策略和运维管理成本。
-    business_impact_zh: 无效虚拟机长期保留会增加资产管理复杂度和容量成本。
+    summary_zh: 关机虚拟机可能仍占用数据存储空间和备份资源。
+    business_impact_zh: 环境中存在关机的虚拟机，建议确认虚拟机是否仍在使用，如无需求可进行删除，进行资源回收。
     technical_impact_zh: 关机虚拟机仍可能占用磁盘、快照、备份策略和清单管理资源。
-    consequence_zh: 如果不清理，可能造成资源浪费和资产台账不准确。
-    remediation_zh: 建议联系业务确认保留必要性，无法确认用途的虚拟机按流程归档或删除。
+    consequence_zh: 未使用的关机虚拟机可能持续占用存储和备份资源。
+    remediation_zh: 环境中存在关机的虚拟机，建议确认虚拟机是否仍在使用，如无需求可进行删除，进行资源回收。
   remediation:
     owner_role: virtualization_admin
     remediation_effort: low

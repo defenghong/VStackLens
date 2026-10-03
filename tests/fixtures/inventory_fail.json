@@ -311,6 +311,8 @@
         "snapshot_age_days_max": 35,
         "snapshot_chain_depth": 3,
         "power_state": "poweredOff",
+        "is_template": false,
+        "is_system_vm": false,
         "tools_running": false,
         "tools_outdated": true,
         "vmware_tools_installed": false,

@@ -423,7 +423,7 @@ rules:
   rule_name: VM ISO mounted
   category: vm
   object_type: VirtualMachine
-  risk_level: P4
+  risk_level: P3
   confidence_level: high
   enabled: true
   rule_version: 1.0.0
@@ -446,7 +446,7 @@ rules:
     pass_when: iso_mounted == False
   severity_policy:
     type: fixed
-    default_level: P4
+    default_level: P3
     rules: []
   evidence_schema:
     current_value_path: iso_mounted
@@ -465,14 +465,14 @@ rules:
   report_fields:
     check_name_zh: 虚拟机光驱挂载状态
     finding_title_zh: 虚拟机挂载 ISO 镜像
-    plain_summary_zh: 检查 虚拟机光驱挂载状态，确认配置或运行状态是否符合建议基线。
+    plain_summary_zh: 检查虚拟机是否仍挂载 ISO 镜像。
     failed_summary_zh: 发现虚拟机挂载 ISO 镜像。
     title_zh: 虚拟机挂载 ISO 镜像
-    summary_zh: 虚拟机 CD-ROM 连接了 ISO 镜像。
-    business_impact_zh: 可能存在迁移受阻或安全管理风险。
-    technical_impact_zh: 已连接 ISO 可能影响 vMotion、启动行为或介质访问。
-    consequence_zh: 可能导致迁移失败、误启动或遗留介质风险。
-    remediation_zh: 确认用途后断开不再需要的 ISO。
+    summary_zh: 虚拟机仍挂载 ISO 镜像。
+    business_impact_zh: 可能导致 vMotion 迁移或 HA 故障切换失败，也可能占用镜像所在的数据存储，影响镜像删除。
+    technical_impact_zh: 虚拟机光驱仍连接 ISO 文件，迁移和故障切换可能受到限制。
+    consequence_zh: 可能导致 vMotion 迁移或 HA 故障切换失败，并使数据存储中的 ISO 文件无法删除。
+    remediation_zh: 确认 ISO 是否仍在使用；不再使用时，断开虚拟机光驱上的 ISO 挂载。
   remediation:
     owner_role: virtualization_admin
     remediation_effort: low
@@ -480,9 +480,9 @@ rules:
     rollback_required: false
     verification_method: rerun_rule
     steps_zh:
-    - 确认 ISO 是否仍有业务用途
-    - 断开虚拟机 CD-ROM 挂载
-    - 检查虚拟机配置并复跑巡检
+    - 确认 ISO 是否仍有业务用途。
+    - 对不再使用的 ISO，断开虚拟机光驱挂载。
+    - 检查虚拟机配置并复跑巡检。
   references:
   - title: vSphere VM administration
     url: https://techdocs.broadcom.com/

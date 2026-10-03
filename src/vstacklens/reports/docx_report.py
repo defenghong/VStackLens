@@ -15,6 +15,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Inches, Pt, RGBColor, Twips
 
 from vstacklens.reports.report_model import FindingItem, ReportData
+from vstacklens.reports.presentation import count_excluded_powered_off_vms, powered_off_exclusion_note
 
 
 LEVEL_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
@@ -95,6 +96,7 @@ FORBIDDEN_REPLACEMENTS = {
     "整改路线图": "后续处理建议",
 }
 CUSTOMER_WORD_REPLACEMENTS = {
+    "TSM-SSH": "SSH",
     "VM 配置资源限制 Limit": "VM 配置资源限制",
     "虚拟机配置了资源 Limit": "虚拟机配置了资源限制",
     "CPU/Memory limit": "CPU/内存资源限制",
@@ -203,7 +205,53 @@ class DocxReportEngine:
                 )
             visible_groups.append(candidate)
 
-        return sorted(visible_groups, key=self._risk_group_sort_key)
+        return self._merge_snapshot_risk_groups(visible_groups)
+
+    def _merge_snapshot_risk_groups(self, groups: list[RiskGroup]) -> list[RiskGroup]:
+        snapshot_rule_ids = {"VSL-VM-001", "VSL-VM-007"}
+        snapshot_groups = [group for group in groups if group.rule_id in snapshot_rule_ids]
+        other_groups = [group for group in groups if group.rule_id not in snapshot_rule_ids]
+        if not snapshot_groups:
+            return sorted(groups, key=self._risk_group_sort_key)
+
+        unique_findings: dict[str, FindingItem] = {}
+        for group in snapshot_groups:
+            for finding in group.findings:
+                key = self._object_key(finding.object_name or finding.object_path)
+                if not key:
+                    continue
+                existing = unique_findings.get(key)
+                if existing is None or LEVEL_ORDER.get(finding.risk_level.upper(), 99) < LEVEL_ORDER.get(existing.risk_level.upper(), 99):
+                    unique_findings[key] = finding
+
+        level = min(
+            (group.level for group in snapshot_groups),
+            key=lambda value: LEVEL_ORDER.get(value, 99),
+            default="P3",
+        )
+        impact = "超期快照或过深快照链可能影响业务性能、备份稳定性和虚拟机维护"
+        merged_findings = [
+            finding.model_copy(update={
+                "risk_level": level,
+                "title": "虚拟机存在快照",
+                "rule_name": "虚拟机存在快照",
+                "business_impact": impact,
+                "consequence": impact,
+            })
+            for finding in sorted(unique_findings.values(), key=lambda item: item.object_name.casefold())
+        ]
+        if not merged_findings:
+            return sorted(other_groups, key=self._risk_group_sort_key)
+        other_groups.append(
+            RiskGroup(
+                level=level,
+                category="虚拟机",
+                title="虚拟机存在快照",
+                findings=merged_findings,
+                rule_id="VSL-VM-SNAPSHOT-MERGED",
+            )
+        )
+        return sorted(other_groups, key=self._risk_group_sort_key)
 
     def _risk_level_for_findings(self, findings: list[FindingItem], default: str = "P3") -> str:
         levels = [finding.risk_level.upper() for finding in findings if finding.risk_level.upper() in LEVEL_ORDER]
@@ -609,7 +657,7 @@ class DocxReportEngine:
                 self._add_heading(document, f"{category_number} {category}", 3)
                 for item_index, group in enumerate(sorted(items, key=self._risk_group_sort_key), start=1):
                     self._add_heading(document, f"{category_number}.{item_index} {group.title}", 4)
-                    self._add_risk_sentence(document, group)
+                    self._add_risk_sentence(document, group, report)
                     table = self._detail_table(report, group)
                     if table:
                         headers, rows = table
@@ -643,7 +691,7 @@ class DocxReportEngine:
         status = str(summary.get("status") or "unknown")
         status_label = {"collected": "已采集", "unavailable": "部分采集", "unknown": "未确认", "not_applicable": "不适用"}.get(status, status)
         self._add_paragraph(document, f"vSAN 采集状态：{status_label}；架构：{summary.get('architecture') or '未采集'}；集群：{', '.join(summary.get('clusters') or []) or '未采集'}。")
-        self._add_paragraph(document, "判定说明：采集成功且异常计数为 0，表示本次采集时点未发现该项异常；存在异常时说明影响和建议；未采集或未确认的数据不按正常处理。")
+        self._add_paragraph(document, "判定说明：采集成功且异常计数为 0，表示本次采集时点未发现该项异常；存在异常时说明影响和建议；未取得或未确认的数据不按正常处理。")
         self._add_paragraph(document, self._vsan_overall_judgement(summary))
 
         self._add_heading(document, "4.1 集群健康", 2)
@@ -1168,6 +1216,8 @@ class DocxReportEngine:
         title = group.title
         rule_text = " ".join(self._clean(f"{item.rule_id} {item.rule_name} {item.title}") for item in group.findings)
         lowered = rule_text.lower()
+        if "VSL-VM-018" in rule_text or title == "存在关机的虚拟机":
+            return self._powered_off_vm_table(report, group)
         if "VSL-CL-001" in rule_text or "集群 HA 未启用" in title or "cluster ha disabled" in lowered:
             return self._cluster_feature_table(report, group, "ha_enabled", "HA 当前状态")
         if "VSL-CL-003" in rule_text or "集群 DRS 未启用" in title or "cluster drs disabled" in lowered:
@@ -1207,6 +1257,18 @@ class DocxReportEngine:
         if "VSL-DS-020" in rule_text or "vsan" in lowered:
             return self._vsan_detail_table(group)
         return self._fallback_detail_table(group)
+
+    def _powered_off_vm_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
+        rows = []
+        for finding in group.findings:
+            props = self._asset_props(report, "VirtualMachine", finding.object_name)
+            state = props.get("power_state") or finding.current_value or "poweredOff"
+            rows.append([
+                finding.object_name,
+                self._power_state_label(state),
+                "确认业务保留必要性；无需保留时按流程归档或删除。",
+            ])
+        return ["虚拟机名称", "当前电源状态", "建议处理"], rows
 
     def _cluster_feature_table(self, report: ReportData, group: RiskGroup, prop_name: str, status_header: str) -> tuple[list[str], list[list[Any]]]:
         rows = []
@@ -1832,16 +1894,24 @@ class DocxReportEngine:
             run = paragraph.add_run(self._clean(item))
             self._format_run(run, size=10.5)
 
-    def _add_risk_sentence(self, document: Document, group: RiskGroup) -> None:
+    def _add_risk_sentence(self, document: Document, group: RiskGroup, report: ReportData) -> None:
         finding = group.findings[0]
         observed = self._sentence_observation(group)
         impact = self._sentence_impact(finding)
+        if group.title == "虚拟机存在快照":
+            impact = "超期快照或过深快照链可能影响业务性能、备份稳定性和虚拟机维护"
         recommendation = self._recommendation(finding)
+        exclusion_note = ""
+        if group.rule_id == "VSL-VM-018":
+            details = (report.asset_inventory or {}).get("details") or {}
+            exclusion_note = powered_off_exclusion_note(
+                count_excluded_powered_off_vms(details.get("VirtualMachine", []))
+            )
         paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = Pt(4)
         level_run = paragraph.add_run(f"{group.level}级。")
         self._format_run(level_run, size=10.5, bold=True, color=LEVEL_STYLE.get(group.level, LEVEL_STYLE["P4"])["text"])
-        body = f"检测到{observed}，可能导致{impact}。建议{recommendation}。"
+        body = f"检测到{observed}，可能导致{impact}。{exclusion_note}建议{recommendation}。"
         body_run = paragraph.add_run(self._clean(body))
         self._format_run(body_run, size=10.5)
 

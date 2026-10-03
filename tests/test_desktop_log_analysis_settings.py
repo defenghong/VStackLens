@@ -9,11 +9,14 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton  # noqa: E402
+import pymupdf  # noqa: E402
 
 from vstacklens.application import DesktopInspectionConfig, InspectionService, ModelConfigProfile  # noqa: E402
+from vstacklens.application.inspection_service import ReportCenterItem  # noqa: E402
 from vstacklens.application.cloud_log_diagnosis import CloudModelClient, CloudModelResult  # noqa: E402
 from vstacklens.desktop import app as desktop_app  # noqa: E402
 from vstacklens.desktop.app import MainWindow, configure_chinese_font  # noqa: E402
+from vstacklens.desktop.pdf_reader import PdfReaderDialog  # noqa: E402
 
 
 def _app() -> QApplication:
@@ -76,6 +79,68 @@ def test_log_analysis_page_uses_profile_and_model_selectors_not_api_fields(tmp_p
     assert window.log_model_profile_combo.currentText() == "DeepSeek 生产账号"
     assert window.log_model_input.currentText() == "deepseek-reasoner"
     window.close()
+
+
+def test_report_center_pdf_button_opens_pdf_file_path(tmp_path: Path, monkeypatch) -> None:
+    app = _app()
+    window = MainWindow(service=InspectionService(config_path=tmp_path / "desktop_config.json"))
+    report_dir = tmp_path / "reports" / "run-1"
+    report_dir.mkdir(parents=True)
+    html_path = report_dir / "index.html"
+    html_path.write_text("<html></html>", encoding="utf-8")
+    pdf_path = report_dir / "VStackLens-PDF-Report.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nfixture")
+    item = ReportCenterItem(
+        run_id="run-1",
+        report_path=html_path,
+        report_dir=report_dir,
+        payload_path=None,
+        title="测试报告",
+        customer_name="测试客户",
+        site_name="测试站点",
+        assessment_time="2026-09-30",
+        score=95,
+        risk_summary={"P1": 0, "P2": 0, "P3": 0, "P4": 0},
+        asset_summary={"Host": 1, "VM": 1, "Datastore": 1},
+        top_risks=[],
+        history_summary="暂无历史对比",
+        status="可查看",
+        report_type="HTML · Word · PDF",
+        path_hint=str(html_path),
+    )
+    window._report_items = [item]
+    window.report_list.addItem("测试报告")
+    window.report_list.setCurrentRow(0)
+    assert window._pdf_report_path_for_item(item) == pdf_path
+    window._report_selection_changed()
+    app.processEvents()
+    opened: list[Path] = []
+    monkeypatch.setattr(window, "_open_path_safe", lambda path: opened.append(Path(path)))
+
+    assert window.report_pdf_button.isEnabled()
+    window.report_pdf_button.click()
+    app.processEvents()
+    assert opened == [pdf_path]
+    window.close()
+
+
+def test_pdf_reader_renders_pages_and_navigates_without_browser(tmp_path: Path) -> None:
+    app = _app()
+    pdf_path = tmp_path / "reader-test.pdf"
+    document = pymupdf.open()
+    document.new_page().insert_text((72, 72), "Page one")
+    document.new_page().insert_text((72, 72), "Page two")
+    document.save(pdf_path)
+    document.close()
+
+    reader = PdfReaderDialog(pdf_path)
+
+    assert reader.page_label.text() == "第 1 / 2 页"
+    assert reader.page_image.pixmap() is not None
+    reader.next_button.click()
+    app.processEvents()
+    assert reader.page_label.text() == "第 2 / 2 页"
+    reader.close()
 
 
 def test_settings_page_shows_collapsible_model_and_security_sections(tmp_path: Path) -> None:

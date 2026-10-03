@@ -74,6 +74,14 @@ class FakeVirtualCdrom:
     pass
 
 
+class FakeVirtualEthernetCard:
+    pass
+
+
+class FakeVirtualPCIPassthrough:
+    pass
+
+
 class FakeVirtualDisk:
     pass
 
@@ -82,6 +90,8 @@ class FakeVim:
     class vm:
         class device:
             VirtualCdrom = FakeVirtualCdrom
+            VirtualEthernetCard = FakeVirtualEthernetCard
+            VirtualPCIPassthrough = FakeVirtualPCIPassthrough
             VirtualDisk = FakeVirtualDisk
 
     class dvs:
@@ -247,7 +257,7 @@ def _host(name: str, cluster):
     system_vm = NS(name="vCLS-4c4c4544-004d-3010", config=NS(hardware=NS(numCPU=8, memoryMB=16384, device=[])))
     host.config = NS(
         service=NS(service=[]),
-        dateTimeInfo=NS(ntpConfig=NS(server=["10.240.0.10"])),
+        dateTimeInfo=NS(ntpConfig=NS(server=["10.0.0.10"])),
         network=NS(
             pnic=[],
             vnic=[],
@@ -397,6 +407,27 @@ def test_vm_quickstats_collect_only_cpu_and_consumed_memory_for_pdf() -> None:
     missing_properties = collector._vm_object(vm_without_stats, FakeVim)["properties"]
     assert missing_properties["cpu_usage_mhz"] is None
     assert missing_properties["memory_usage_mb"] is None
+
+
+def test_vm_object_collects_template_iso_path_and_committed_storage() -> None:
+    collector = _collector()
+    cluster = _cluster("Cluster-VM-details")
+    host = _host("esxi-vm-details", cluster)
+    datastore = _datastore("shared-vm-details", "NFS", [host])
+    vm = _vm("vm-details", host, [datastore])
+    vm.config.template = True
+    cdrom = FakeVim.vm.device.VirtualCdrom()
+    cdrom.backing = NS(fileName="[shared-vm-details] images/installer.iso")
+    cdrom.connectable = NS(connected=True)
+    vm.config.hardware.device = [cdrom]
+    vm.summary = NS(storage=NS(committed=12 * GB), quickStats=NS())
+
+    properties = collector._vm_object(vm, FakeVim)["properties"]
+
+    assert properties["is_template"] is True
+    assert properties["iso_mounted"] is True
+    assert properties["iso_paths"] == ["[shared-vm-details] images/installer.iso"]
+    assert properties["storage_committed_bytes"] == 12 * GB
 
 
 def _sample_host_physical_nics(host):

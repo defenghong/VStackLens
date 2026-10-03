@@ -166,6 +166,7 @@ class InspectionRunResult:
     risk_summary: dict[str, int] = field(default_factory=dict)
     pdf_path: Path | None = None
     pdf_error: str | None = None
+    html_error: str | None = None
 
 
 class InspectionCancelledError(RuntimeError):
@@ -763,7 +764,7 @@ class InspectionService:
             ssl_no_verify=cfg.ssl_no_verify,
         )
         try:
-            LOGGER.info("vCenter inspection connecting vcenter=%s username=%s ssl_no_verify=%s", cfg.vcenter, cfg.username, cfg.ssl_no_verify)
+            LOGGER.info("vCenter inspection connecting vcenter=%s ssl_no_verify=%s", cfg.vcenter, cfg.ssl_no_verify)
             result = self.runner.run_vcenter(
                 request,
                 progress=lambda stage, percent: self._set_progress(stage, percent, progress_callback, cancel_requested),
@@ -780,6 +781,7 @@ class InspectionService:
                 docx_error=result.docx_error,
                 pdf_path=result.pdf_path,
                 pdf_error=result.pdf_error,
+                html_error=result.html_error,
             )
             LOGGER.info(
                 "vCenter inspection completed run_id=%s report=%s docx=%s pdf=%s",
@@ -1361,7 +1363,7 @@ class InspectionService:
                             """
                             SELECT file_path, report_type, run_id
                             FROM reports
-                            WHERE report_type IN ('html_package', 'docx')
+                            WHERE report_type IN ('html_package', 'docx', 'pdf')
                               AND report_status = 'success'
                               AND file_path IS NOT NULL
                             ORDER BY COALESCE(generated_at, updated_at, created_at) DESC
@@ -1421,6 +1423,14 @@ class InspectionService:
                 if self._is_log_analysis_artifact_path(docx_path) or self._is_upgrade_compat_artifact_path(docx_path):
                     continue
                 item = self._report_center_item(docx_path, report_type="docx")
+                if self._report_center_item_visible(item):
+                    packages.setdefault(self._report_item_key(item), item)
+            for pdf_path in root.rglob("*.pdf"):
+                if not self._is_report_pdf_candidate(pdf_path):
+                    continue
+                if self._is_log_analysis_artifact_path(pdf_path) or self._is_upgrade_compat_artifact_path(pdf_path):
+                    continue
+                item = self._report_center_item(pdf_path, report_type="pdf")
                 if self._report_center_item_visible(item):
                     packages.setdefault(self._report_item_key(item), item)
 
@@ -1740,7 +1750,8 @@ class InspectionService:
     def _report_center_item(self, report_path: Path, db_item: ReportHistoryItem | None = None, report_type: str | None = None) -> ReportCenterItem:
         path = Path(report_path)
         is_docx = (report_type == "docx") or path.suffix.lower() == ".docx"
-        report_dir = path.parent if path.name.lower() == "index.html" or is_docx else path
+        is_pdf = (report_type == "pdf") or path.suffix.lower() == ".pdf"
+        report_dir = path.parent if path.name.lower() == "index.html" or is_docx or is_pdf else path
         index_path = report_dir / "index.html"
         payload_path = report_dir / "data" / "customer_report_payload.json"
         payload = self._read_report_payload(payload_path) if payload_path.exists() else {}
@@ -1779,8 +1790,8 @@ class InspectionService:
         elif isinstance(history, dict) and history.get("state") in {"environment_mismatch", "run_unavailable"}:
             # 跨 vCenter 环境或所选记录不可用时，只透出明确的不可比提示。
             history_summary = str(history.get("summary_text") or "暂无可比的历史巡检记录")
-        visible_path = path if is_docx else index_path
-        status = "可查看" if visible_path.exists() and (payload or is_docx) else "数据不完整" if visible_path.exists() else "文件缺失"
+        visible_path = path if is_docx or is_pdf else index_path
+        status = "可查看" if visible_path.exists() and (payload or is_docx or is_pdf) else "数据不完整" if visible_path.exists() else "文件缺失"
         return ReportCenterItem(
             run_id=db_item.run_id if db_item else None,
             report_path=visible_path if visible_path.exists() else None,
@@ -1796,7 +1807,7 @@ class InspectionService:
             top_risks=self._report_top_risks(payload),
             history_summary=history_summary,
             status=status,
-            report_type=self._report_type_label("docx" if is_docx else (report_type or "html_package")),
+            report_type=self._report_type_label("docx" if is_docx else "pdf" if is_pdf else (report_type or "html_package")),
             path_hint=str(visible_path if visible_path.exists() else report_dir),
         )
 
@@ -1806,11 +1817,11 @@ class InspectionService:
 
     @staticmethod
     def _merge_health_report_formats(items: Iterable[ReportCenterItem]) -> list[ReportCenterItem]:
-        """Present HTML and Word exports from one health run as a single task."""
+        """Present HTML, Word, and PDF exports from one health run as a single task."""
         grouped: dict[Path, list[ReportCenterItem]] = {}
         standalone: list[ReportCenterItem] = []
         for item in items:
-            if item.report_type in {"HTML 报告包", "Word 报告"}:
+            if item.report_type in {"HTML 报告包", "Word 报告", "PDF 报告"}:
                 grouped.setdefault(item.report_dir, []).append(item)
             else:
                 standalone.append(item)
@@ -1818,13 +1829,22 @@ class InspectionService:
         for members in grouped.values():
             html_item = next((item for item in members if item.report_type == "HTML 报告包"), None)
             word_item = next((item for item in members if item.report_type == "Word 报告"), None)
-            primary = html_item or word_item
+            pdf_item = next((item for item in members if item.report_type == "PDF 报告"), None)
+            primary = html_item or word_item or pdf_item
             if primary is None:
                 continue
-            if html_item and word_item:
-                primary.report_type = "HTML · Word"
-                primary.report_path = html_item.report_path
-                primary.path_hint = str(html_item.report_path or primary.report_dir)
+            formats = [
+                label for label, item in (
+                    ("HTML", html_item),
+                    ("Word", word_item),
+                    ("PDF", pdf_item),
+                ) if item is not None
+            ]
+            if len(formats) > 1:
+                primary.report_type = " · ".join(formats)
+                preferred = html_item or word_item or pdf_item
+                primary.report_path = preferred.report_path
+                primary.path_hint = str(preferred.report_path or primary.report_dir)
             merged.append(primary)
         return [*standalone, *merged]
 
@@ -1840,6 +1860,10 @@ class InspectionService:
             (report_dir / "data" / "customer_report_payload.json").exists()
             or (report_dir / "log_analysis_payload.json").exists()
         )
+
+    @staticmethod
+    def _is_report_pdf_candidate(path: Path) -> bool:
+        return Path(path).name.lower() == "vstacklens-pdf-report.pdf" and Path(path).is_file()
 
     def _ignored_report_path_keys(self, db_path: Path) -> set[str]:
         db = Path(db_path)
@@ -1876,6 +1900,7 @@ class InspectionService:
             "html_package": "HTML 报告包",
             "html": "HTML 报告",
             "docx": "Word 报告",
+            "pdf": "PDF 报告",
             "log_analysis_html": "日志分析 HTML 报告",
             "log_analysis_docx": "日志分析 Word 报告",
             "json": "数据文件",
@@ -1982,9 +2007,20 @@ class InspectionService:
         docx_error: str | None = None,
         pdf_path: Path | None = None,
         pdf_error: str | None = None,
+        html_error: str | None = None,
     ) -> InspectionRunResult:
         with connect(db_path) as conn:
             row = conn.execute("SELECT score, risk_summary_json, risk_category_summary_json FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone()
+            html_row = conn.execute(
+                """
+                SELECT file_path, report_status, error_message
+                FROM reports
+                WHERE run_id = ? AND report_type = 'html_package'
+                ORDER BY COALESCE(generated_at, updated_at, created_at) DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
             docx_row = conn.execute(
                 """
                 SELECT file_path, report_status, error_message
@@ -2015,6 +2051,8 @@ class InspectionService:
                 pdf_path = Path(pdf_row["file_path"])
             if not pdf_error and pdf_row["report_status"] != "success":
                 pdf_error = pdf_row["error_message"] or "PDF 报告未生成。"
+        if html_row and not html_error and html_row["report_status"] != "success":
+            html_error = html_row["error_message"] or "HTML 报告未生成。"
         risk_summary = self._risk_summary_from_json((row["risk_category_summary_json"] or row["risk_summary_json"]) if row else "{}")
         result = InspectionRunResult(
             run_id=run_id,
@@ -2027,6 +2065,7 @@ class InspectionService:
             risk_summary=risk_summary,
             pdf_path=pdf_path,
             pdf_error=pdf_error,
+            html_error=html_error,
         )
         self._progress = InspectionProgress(
             state=InspectionState.COMPLETED,

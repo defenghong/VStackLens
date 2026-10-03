@@ -56,6 +56,34 @@ MODULE_ORDER = {
 SEVERITY_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
 
 
+def count_excluded_powered_off_vms(vm_rows: list[dict[str, Any]]) -> int:
+    count = 0
+    for row in vm_rows:
+        if not isinstance(row, dict):
+            continue
+        properties = row.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        state = str(properties.get("power_state") or row.get("power_state") or "").casefold()
+        is_off = state in {"poweredoff", "powered_off", "off", "关机"}
+        is_excluded = properties.get("is_template") is True or properties.get("is_system_vm") is True
+        if is_off and is_excluded:
+            count += 1
+    return count
+
+
+def powered_off_exclusion_note(count: int) -> str:
+    return f"另有 {count} 台关机的模板或系统虚拟机，不计入。" if count > 0 else ""
+
+
+def append_report_sentence(value: Any, sentence: str) -> str:
+    text = str(value or "").strip()
+    if not sentence or sentence.casefold() in text.casefold():
+        return text
+    if not text:
+        return sentence
+    return text.rstrip("。；;") + "。" + sentence
+
+
 def object_type_label(value: str | None) -> str:
     return OBJECT_TYPE_LABELS.get(value or "", value or "")
 

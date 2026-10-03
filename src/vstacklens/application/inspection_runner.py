@@ -107,6 +107,7 @@ class RunnerResult:
     docx_error: str | None = None
     pdf_path: Path | None = None
     pdf_error: str | None = None
+    html_error: str | None = None
 
 
 CERTIFICATE_DOWNGRADE_WARNING = "vCenter 证书未通过可信链校验，本次巡检已在不校验证书模式下继续完成。建议后续为 vCenter 配置受信任证书，以提升连接安全性。"
@@ -426,19 +427,37 @@ class InspectionRunner:
             report_context["history_comparison"] = HistoryComparisonBuilder().build(conn, previous_run_id, run.run_id)
         report_data = ReportDataFactory().from_context(report_context)
         report_data.report_info.report_title = (report_title or "").strip() or DEFAULT_REPORT_TITLE
-        index_path, zip_path = HtmlReportPackageBuilder().render(report_data, report_context, paths.report_dir, zip_package=zip_report)
-        paths = replace(paths, report_dir=index_path.parent)
-        insert_report(
-            conn,
-            run.run_id,
-            run.customer_id,
-            site_id,
-            run.vcenter_id,
-            str(index_path),
-            "success",
-            report_type="html_package",
-            report_name=report_data.report_info.report_title,
-        )
+        index_path = paths.report_dir / "index.html"
+        zip_path: Path | None = None
+        html_error: str | None = None
+        try:
+            index_path, zip_path = HtmlReportPackageBuilder().render(report_data, report_context, paths.report_dir, zip_package=zip_report)
+            paths = replace(paths, report_dir=index_path.parent)
+            insert_report(
+                conn,
+                run.run_id,
+                run.customer_id,
+                site_id,
+                run.vcenter_id,
+                str(index_path),
+                "success",
+                report_type="html_package",
+                report_name=report_data.report_info.report_title,
+            )
+        except Exception as exc:  # noqa: BLE001 - each customer format is attempted independently.
+            html_error = f"HTML 报告生成失败：{exc}"
+            insert_report(
+                conn,
+                run.run_id,
+                run.customer_id,
+                site_id,
+                run.vcenter_id,
+                str(index_path),
+                "failed",
+                error=html_error,
+                report_type="html_package",
+                report_name=report_data.report_info.report_title,
+            )
         if zip_path:
             insert_report(
                 conn,
@@ -507,7 +526,7 @@ class InspectionRunner:
                 )
         payload_path = paths.report_dir / "data" / "customer_report_payload.json"
         engineering_path = paths.report_dir / "engineering_diagnostics.md"
-        scan_paths = [index_path, payload_path, json_path]
+        scan_paths = [path for path in (index_path, payload_path, json_path) if path.is_file()]
         if zip_path:
             scan_paths.append(zip_path)
         if docx_path:
@@ -525,7 +544,7 @@ class InspectionRunner:
             db_path=db,
             report_context=report_context,
             report_paths={
-                "HTML": index_path,
+                "HTML": index_path if index_path.is_file() else None,
                 "Word": docx_path,
                 "PDF": pdf_path,
                 "JSON": json_path,
@@ -554,6 +573,7 @@ class InspectionRunner:
             docx_error=docx_error,
             pdf_path=pdf_path,
             pdf_error=pdf_error,
+            html_error=html_error,
         )
 
     def _atomic_stage(self, conn: Any, name: str, operation: Callable[[], Any]) -> Any:

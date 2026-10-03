@@ -126,6 +126,37 @@ def test_powered_off_vm_performance_rules_are_not_applicable() -> None:
     assert statuses["VSL-VM-002"] == "passed"
 
 
+def test_powered_off_vm_rule_uses_power_state_without_duration_and_excludes_templates_and_vcls() -> None:
+    raw = {
+        "objects": [
+            {
+                "object_type": "VirtualMachine",
+                "object_key": object_key,
+                "object_name": name,
+                "object_path": f"vc/{name}",
+                "properties": {
+                    "power_state": power_state,
+                    "is_template": is_template,
+                    "is_system_vm": is_system_vm,
+                },
+            }
+            for object_key, name, power_state, is_template, is_system_vm in (
+                ("vm-off", "app-off", "poweredOff", False, False),
+                ("vm-on", "app-on", "poweredOn", False, False),
+                ("vm-template", "template-off", "poweredOff", True, False),
+                ("vm-vcls", "vCLS-test", "poweredOff", False, True),
+            )
+        ]
+    }
+
+    results = execute_raw(raw)
+
+    assert result_for(results, "VSL-VM-018", "app-off")["result_status"] == "failed"
+    assert result_for(results, "VSL-VM-018", "app-off")["risk_level"] == "P3"
+    for name in ("app-on", "template-off", "vCLS-test"):
+        assert result_for(results, "VSL-VM-018", name)["result_status"] != "failed"
+
+
 def test_cpu_ready_customer_display_formatting_does_not_change_rule_semantics() -> None:
     raw = {
         "objects": [

@@ -68,6 +68,25 @@ def test_single_page_problem_summary_uses_full_title_and_existing_copy() -> None
     assert 'return `<tr><td class="problem-risk-${esc(item.level)}">${esc(item.level)}</td><td>${esc(item.title)}' in SINGLE_PAGE_REPORT_JS
     assert "summarySentence(item.current)" in SINGLE_PAGE_REPORT_JS
     assert "summarySentence(item.remediation)" in SINGLE_PAGE_REPORT_JS
+    assert HtmlReportPackageBuilder()._clean_customer_text("停止 TSM-SSH 服务") == "停止 SSH 服务"
+
+
+def test_single_page_powered_off_issue_explains_excluded_templates_and_system_vms() -> None:
+    builder = HtmlReportPackageBuilder()
+    issues = builder._single_page_issues(
+        [{
+            "risk_level": "P3",
+            "rule_id": "VSL-VM-018",
+            "title": "存在关机的虚拟机",
+            "object_type": "VirtualMachine",
+            "object_name": "vm-off",
+        }],
+        {},
+        powered_off_note="另有 6 台关机的模板或系统虚拟机，不计入。",
+    )
+
+    assert len(issues) == 1
+    assert "另有 6 台关机的模板或系统虚拟机，不计入。" in issues[0]["current"]
 
 
 def test_single_page_cluster_vm_tables_are_counted_and_collapsed_by_default() -> None:
