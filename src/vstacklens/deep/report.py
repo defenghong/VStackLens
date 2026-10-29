@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from collections import Counter
 from datetime import UTC, datetime
 from math import isfinite
@@ -561,11 +562,14 @@ class DeepHtmlReportBuilder:
     def render(self, report: DeepReport, output_path: Path, dataset: DeepDataset) -> Path:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(self._html(report, dataset), encoding="utf-8")
-        (output_path.parent / "deep_report_payload.json").write_text(
-            json.dumps({"report": report.model_dump(mode="json"), "dataset_id": dataset.dataset_id}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        from vstacklens.application.artifact_publish import staged_file
+        from vstacklens.application.artifact_safety import ensure_artifacts_safe
+        with staged_file(output_path) as stage:
+            stage.write_text(self._html(report, dataset), encoding="utf-8")
+            payload = stage.parent / "deep_report_payload.json"
+            payload.write_text(json.dumps({"report": report.model_dump(mode="json"), "dataset_id": dataset.dataset_id}, ensure_ascii=False, indent=2), encoding="utf-8")
+            ensure_artifacts_safe([stage, payload])
+            os.replace(payload, output_path.parent / payload.name)
         return output_path
 
     def _html(self, report: DeepReport, dataset: DeepDataset) -> str:
@@ -750,7 +754,9 @@ class DeepWordReportBuilder:
                             detail_paragraph.paragraph_format.keep_with_next = index < len(details) - 1
                             detail_paragraph.paragraph_format.space_before = Pt(0)
                             detail_paragraph.paragraph_format.space_after = Pt(0)
-        document.save(output_path)
+        from vstacklens.application.artifact_publish import staged_file
+        with staged_file(output_path) as stage:
+            document.save(stage)
         return output_path
 
     @staticmethod

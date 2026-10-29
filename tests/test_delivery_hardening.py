@@ -29,7 +29,7 @@ def test_exact_driver_still_requires_same_firmware(firmware, expected):
     result = HclMatcher(Store()).match(("1", "2", "3", "4"), "ESXi 8.0 U3", "drv", "3.0", firmware)
     assert result.status == expected
 
-@pytest.mark.parametrize("risk,label", [({},"健康"),({"P3":1},"正常"),({"P2":1},"关注"),({"P1":1},"危险")])
+@pytest.mark.parametrize("risk,label", [({},"健康"),({"P3":1},"存在整改事项"),({"P2":1},"关注"),({"P1":1},"危险")])
 def test_health_labels_do_not_depend_on_numeric_scores(risk,label):
     assert assess_health(risk,{"passed":10},2)["label"] == label
 

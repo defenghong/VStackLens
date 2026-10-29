@@ -118,6 +118,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: ha_enabled == False
     fail_when: ha_isolation_response in ['powerOff', 'shutdown']
     pass_when: ha_isolation_response in ['none', 'leavePoweredOn']
   severity_policy:
@@ -636,6 +637,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: vm_reservation_too_high == True
     pass_when: vm_reservation_too_high == False
   severity_policy:
@@ -709,6 +711,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: vm_resource_limit_present == True
     pass_when: vm_resource_limit_present == False
   severity_policy:
@@ -785,6 +788,7 @@ rules:
       override_allowed: true
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: vcpu_count > max_vcpu_count
     pass_when: vcpu_count <= max_vcpu_count
   severity_policy:
@@ -864,6 +868,7 @@ rules:
       override_allowed: true
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: hardware_version_number < min_hardware_version
     pass_when: hardware_version_number >= min_hardware_version
   severity_policy:
@@ -940,6 +945,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: invalid_network_count > 0
     pass_when: invalid_network_count == 0
   severity_policy:
@@ -1013,6 +1019,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: orphaned_or_inaccessible == True
     pass_when: orphaned_or_inaccessible == False
   severity_policy:
@@ -1085,6 +1092,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: passthrough_device_count > 0
     pass_when: passthrough_device_count == 0
   severity_policy:
@@ -1137,7 +1145,7 @@ rules:
   rule_name: VM 磁盘需要执行 Consolidation
   category: vm
   object_type: VirtualMachine
-  risk_level: P3
+  risk_level: P2
   health_impact: none
   confidence_level: medium
   enabled: true
@@ -1162,11 +1170,12 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: needs_consolidation == True
     pass_when: needs_consolidation == False
   severity_policy:
     type: fixed
-    default_level: P3
+    default_level: P2
     rules: []
   evidence_schema:
     current_value_path: needs_consolidation

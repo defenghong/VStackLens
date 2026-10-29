@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from pathlib import Path
 from zipfile import ZipFile
 from types import SimpleNamespace
@@ -164,7 +165,7 @@ def rich_report() -> ReportData:
             ),
             FindingItem(
                 risk_level="P3",
-                rule_id="VSL-VM-004",
+                rule_id="VSL-VM-002",
                 rule_name="VMware Tools 状态",
                 title="VMware Tools 未运行",
                 object_type="VirtualMachine",
@@ -362,7 +363,7 @@ def table_layout_report() -> ReportData:
             ),
             FindingItem(
                 risk_level="P3",
-                rule_id="VSL-VM-099",
+                rule_id="VSL-VM-011",
                 rule_name="VM resource limit configuration",
                 title="虚拟机配置了资源 Limit",
                 object_type="VirtualMachine",
@@ -496,8 +497,8 @@ def table_layout_report() -> ReportData:
             ),
             FindingItem(
                 risk_level="P3",
-                rule_id="VSL-DS-020",
-                rule_name="vSAN datastore capacity health",
+                rule_id="VSL-DS-001",
+                rule_name="Datastore capacity health",
                 title="vSAN 存储健康存在异常",
                 object_type="Datastore",
                 object_name="vsanDatastore",
@@ -533,29 +534,52 @@ def docx_text(path: Path) -> str:
     for table in doc.tables:
         for row in table.rows:
             parts.extend(cell.text for cell in row.cells if cell.text.strip())
-    return "\n".join(parts)
+    return "\n".join(parts + [p.text for section in doc.sections for area in (section.header, section.footer) for p in area.paragraphs]).replace("\u200b", "")
+
+
+def assert_docx_summary_cards(path: Path, categories: int, affected_objects: int) -> None:
+    """Count totals in the visible KPI cards after cover prose de-duplication."""
+    cells = [
+        ["".join(p.xpath(".//w:t/text()")).replace("\u200b", "").strip()
+         for p in cell.xpath("./w:p")]
+        for cell in Document(path).element.xpath("//w:tc")
+    ]
+    for label, value in (("问题类别", categories), ("受影响对象", affected_objects)):
+        matches = [lines for lines in cells if len(lines) >= 2 and lines[0] == label]
+        assert len(matches) == 1, (label, matches)
+        assert matches[0][1] == str(value), (label, value, matches[0])
 
 
 def docx_headings(path: Path) -> list[str]:
     doc = Document(path)
-    return [paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.style.name.startswith("Heading") and paragraph.text.strip()]
+    return ["".join(p.xpath(".//w:t/text()")).replace("\u200b", "").strip() for p in doc.element.xpath("//w:p[w:pPr/w:pStyle[starts-with(@w:val,'Heading')]]")]
 
+
+class EvidenceTableView:
+    """Keep all data assertions while recognizing the repeated parent-issue header."""
+    def __init__(self, table):
+        self.table=table
+        self.offset=int(len(table.rows)>1 and (table.rows[0].cells[0]._tc.get_or_add_tcPr().find(qn("w:gridSpan")) is not None or "/续表" in table.rows[0].cells[0].text))
+    def __getattr__(self,name):return getattr(self.table,name)
+    @property
+    def rows(self):return self.table.rows[self.offset:]
+    def cell(self,row,col):return self.table.cell(row+self.offset,col)
 
 def table_headers(table) -> list[str]:
-    return [cell.text.strip() for cell in table.rows[0].cells]
+    return [cell.text.replace("\u200b", "").strip() for cell in EvidenceTableView(table).rows[0].cells]
 
 
 def find_table_with_headers(path: Path, headers: list[str]):
     doc = Document(path)
     for table in doc.tables:
         if table_headers(table) == headers:
-            return table
+            return EvidenceTableView(table)
     raise AssertionError(f"table with headers not found: {headers}")
 
 
 def find_tables_with_headers(path: Path, headers: list[str]):
     doc = Document(path)
-    return [table for table in doc.tables if table_headers(table) == headers]
+    return [EvidenceTableView(table) for table in doc.tables if table_headers(table) == headers]
 
 
 def cell_fill(cell) -> str | None:
@@ -613,74 +637,30 @@ def docx_xml(path: Path, member: str) -> str:
 
 
 def test_exporter_renders_docx_by_default_suffix(tmp_path: Path) -> None:
-    output = tmp_path / "report"
-    rendered_path, report_type, report_name = ReportExportEngine().render(minimal_report(), output)
-
-    assert rendered_path == tmp_path / "report.docx"
-    assert report_type == "docx"
-    assert report_name == "VStackLens Word Report"
-    assert rendered_path.exists()
-    text = docx_text(rendered_path)
-    headings = docx_headings(rendered_path)
-    assert "vSphere 环境健康巡检报告" in text
-    assert "交付客户" in text
-    assert "vcsa.test.local" in text
-    assert "1. 执行摘要" in headings
-    assert "1.4 重点问题" in headings
-    assert "1.5 巡检结论" in headings
-    assert "2. 问题与整改建议" in headings
-    assert "2.1 P1" in headings
-    assert "2.2 P2" in headings
-    assert "2.3 P3" in headings
-    assert "3. VMware 巡检" in headings
-    assert "5. 环境资产与对象清单" in headings
-    assert not any("附录" in heading for heading in headings)
-    assert "完整的对象明细、证据和采集来源保留在同一次巡检生成的 HTML 报告和数据包中。" not in text
-    assert "P1" in text
-    assert "对象\n告警内容\n确认状态\n时间\n状态" in text
-    assert "健康评分" not in text
-    for term in FORBIDDEN_WORD_TERMS:
-        assert term not in text
+    report=minimal_report();rendered_path,report_type,report_name=ReportExportEngine().render(report,tmp_path/'report')
+    assert rendered_path==tmp_path/'report.docx' and report_type=='docx' and report_name=='VStackLens Word Report'
+    text=docx_text(rendered_path);headings=docx_headings(rendered_path)
+    assert report.report_info.report_title in text and '交付客户' in text and 'vcsa.test.local' in text
+    chapters=[re.sub(r'^\d{2}\s+','',h) for h in headings if re.match(r'^\d{2}\s+',h)]
+    assert chapters==['问题总览','问题详情','环境详情']
+    assert any(h.startswith('附录 A') for h in headings)
+    assert 'P1' in text and 'vCenter 存在红色活动告警' in text and '健康评分' not in text
+    for term in FORBIDDEN_WORD_TERMS:assert term not in text
 
 
 def test_exporter_generates_idle_vsan_resync_panel(tmp_path: Path) -> None:
-    report = minimal_report().model_copy(update={
-        "vsan_summary": {
-            "status": "collected",
-            "resync_object_count": 0,
-            "resync_bytes": 0,
-        }
-    })
-
-    rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "vsan-report.docx")
-    text = docx_text(rendered_path)
-
-    assert "当前无待同步任务" in text
-    assert "0 个" in text
-    assert "0 B" in text
-    assert "0 秒" in text
-    assert "0 项" in text
+    report=minimal_report().model_copy(update={'vsan_summary':{'status':'collected','clusters':['Cluster-A'],'resync_object_count':0,'resync_bytes':0}})
+    path,_,_=ReportExportEngine().render(report,tmp_path/'vsan.docx');text=docx_text(path)
+    assert '重同步对象' in text and '0 个' in text and '重同步数据' in text and '0.0 GB' in text
+    assert '预计完成时间' not in text and '计划重同步' not in text
 
 
 def test_vsan_charts_do_not_render_zero_abnormal_or_empty_segment(tmp_path: Path) -> None:
-    report = minimal_report().model_copy(update={
-        "vsan_summary": {
-            "status": "collected",
-            "object_count": 165,
-            "vmdk_count": 86,
-            "object_issue_count": 0,
-            "capacity": {"status": "normal", "used_percent": 10.1, "total_gb": 100.0, "used_gb": 10.1, "free_gb": 89.9},
-        }
-    })
-    rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "vsan-charts.docx")
-    doc = Document(rendered_path)
-    object_bar = next(table for table in doc.tables if table.rows[0].cells[0].text == "vSAN 对象")
-    vmdk_bar = next(table for table in doc.tables if table.rows[0].cells[0].text == "VMDK")
-    capacity_bar = next(table for table in doc.tables if table.rows[0].cells[0].text == "容量")
-    assert [cell.text for cell in object_bar.rows[0].cells] == ["vSAN 对象", "正常 165"]
-    assert [cell.text for cell in vmdk_bar.rows[0].cells] == ["VMDK", "已识别 86"]
-    assert len(capacity_bar.rows[0].cells) == 3
-    assert "异常 0" in docx_text(rendered_path)
+    report=minimal_report().model_copy(update={'vsan_summary':{'status':'collected','object_count':165,'vmdk_count':86,
+        'object_issue_count':0,'capacity':{'status':'normal','used_percent':10.1,'total_gb':100.0,'used_gb':10.1,'free_gb':89.9}}})
+    path,_,_=ReportExportEngine().render(report,tmp_path/'vsan.docx');text=docx_text(path)
+    assert '165 个 vSAN 对象' in text and '健康异常 0 项' in text and '86' in text and '10.1%' in text
+    assert 'VMDK' in text and '整体正常' not in text
 
 
 def test_docx_feedback_revision_uses_native_toc_field(tmp_path: Path) -> None:
@@ -714,19 +694,15 @@ def test_html_report_engine_autoescapes_jinja_template_values(tmp_path: Path) ->
 
 
 def test_docx_v2_issue_summary_table_has_expected_headers_colors_and_widths(tmp_path: Path) -> None:
-    rendered_path, _, _ = ReportExportEngine().render(table_layout_report(), tmp_path / "report.docx")
-    table = find_table_with_headers(rendered_path, ["等级", "分类", "问题描述", "影响数量", "建议动作"])
-
-    widths = [cell_width(cell) for cell in table.rows[0].cells]
-    assert widths == [950, 1400, 2400, 950, 3825]
-
-    expected_fills = {"P1": "C00000", "P2": "7030A0", "P3": "FFC000"}
-    seen: dict[str, str] = {}
+    path,_,_=ReportExportEngine().render(table_layout_report(),tmp_path/'report.docx')
+    table=find_table_with_headers(path,['等级','问题类别','受影响对象'])
+    widths=table_grid_widths(table);assert len(widths)==3 and widths[1]>widths[0] and sum(widths)==table_width(table)
+    expected={'P1':'B3261E','P2':'A15C07','P3':'3F6688'};seen={}
     for row in table.rows[1:]:
-        level = row.cells[0].text.strip()
-        if level in expected_fills:
-            seen[level] = cell_fill(row.cells[0])
-    assert seen == expected_fills
+        level=row.cells[0].text.strip()
+        if level in expected:
+            seen[level]=next(str(r.font.color.rgb) for p in row.cells[0].paragraphs for r in p.runs if r.text)
+    assert seen==expected
 
 
 def test_docx_summary_counts_grouped_issues_separately_from_object_details(tmp_path: Path) -> None:
@@ -746,17 +722,16 @@ def test_docx_summary_counts_grouped_issues_separately_from_object_details(tmp_p
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "report.docx")
     text = docx_text(rendered_path)
 
-    assert f"{sum(group_counts.values())}" in text
-    assert f"{sum(detail_counts.values())}" in text
-    assert "类建议关注问题" in text
-    assert "条对象明细" in text
-    assert "按问题类型统计" in text
-    assert "按影响对象明细统计" in text
-    assert "Word 正文仅保留代表性对象明细" in text
-    assert "完整对象清单建议在 HTML 报告中查看" in text
+    # Totals remain distinct and correct in cards; the repeated cover sentence is gone.
+    assert_docx_summary_cards(rendered_path, sum(group_counts.values()), report.customer_caliber['affected_total'])
+    assert "按问题类型统计" not in text
+    assert "按等级内去重涉及对象统计" not in text
+    assert "问题总览" in text and "按集群汇总" in text
+    assert "仅保留代表性对象明细" not in text
+    assert "完整对象清单建议在 HTML 报告中查看" not in text
 
 
-def test_docx_merges_expired_and_deep_snapshots_into_one_p1_problem(tmp_path: Path) -> None:
+def test_docx_merges_snapshots_at_highest_recorded_level(tmp_path: Path) -> None:
     report = rich_report().model_copy(deep=True)
     report.findings = []
     for index in range(14):
@@ -799,7 +774,7 @@ def test_docx_merges_expired_and_deep_snapshots_into_one_p1_problem(tmp_path: Pa
     text = docx_text(output)
     assert "虚拟机存在快照" in text
     assert "虚拟机快照链过深" not in text
-    assert "超期快照或过深快照链" in text
+    assert "快照不能替代备份。长期保留会使增量磁盘持续变大，占用存储并降低虚拟机磁盘性能，删除时合并耗时也更长。" in text
 
 
 def test_docx_powered_off_problem_explains_excluded_templates(tmp_path: Path) -> None:
@@ -828,7 +803,7 @@ def test_docx_powered_off_problem_explains_excluded_templates(tmp_path: Path) ->
 
     output, _, _ = ReportExportEngine().render(report, tmp_path / "powered-off-scope.docx")
     text = docx_text(output)
-    detail = find_table_with_headers(output, ["虚拟机名称", "当前电源状态", "建议处理"])
+    detail = find_table_with_headers(output, ["虚拟机", "电源状态"])
 
     assert "另有 6 台关机的模板或系统虚拟机，不计入。" in text
     assert detail.rows[1].cells[1].text.strip() == "关机"
@@ -857,76 +832,45 @@ def test_docx_customer_text_replaces_internal_tsm_ssh_service_name(tmp_path: Pat
 
 
 def test_docx_customer_report_hides_p4_items(tmp_path: Path) -> None:
-    rendered_path, _, _ = ReportExportEngine().render(rich_report(), tmp_path / "report.docx")
+    report = rich_report()
+    report.findings.append(FindingItem(rule_id="VSL-VM-015", rule_name="硬件版本", title="P4 示例", risk_level="P4", object_type="VirtualMachine", object_name="app-01", status="failed"))
+    rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "report.docx")
     text = docx_text(rendered_path)
 
     assert "P4" not in text
     assert "P4级" not in text
+    # This fixture recorded P4. A later rulepack must not promote it to P2.
     assert "集群 vMotion 网络覆盖不完整" not in text
 
 
 def test_docx_tables_use_fixed_total_width_and_semantic_alignment(tmp_path: Path) -> None:
-    rendered_path, _, _ = ReportExportEngine().render(table_layout_report(), tmp_path / "report.docx")
-    doc = Document(rendered_path)
-
+    path,_,_=ReportExportEngine().render(table_layout_report(),tmp_path/'report.docx');doc=Document(path)
+    available=round((doc.sections[0].page_width-doc.sections[0].left_margin-doc.sections[0].right_margin)/635)
     assert doc.tables
     for table in doc.tables:
-        label = table.rows[0].cells[0].text.strip()
-        expected_layout = "fixed" if label in {"vSAN 对象", "VMDK", "容量"} else "autofit"
-        assert table_layout(table) == expected_layout
-        assert table.autofit is (expected_layout == "autofit")
-        assert table_width(table) == 9525
-        assert sum(table_grid_widths(table)) == 9525
-        assert [cell_width(cell) for cell in table.rows[0].cells] == table_grid_widths(table)
-        assert row_cant_split(table.rows[0])
-        for cell in table.rows[0].cells:
-            assert cell.vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            assert cell_alignment(cell) == WD_ALIGN_PARAGRAPH.CENTER
-        for row in table.rows[1:]:
-            assert row_cant_split(row)
+        assert table_layout(table)=='fixed' and table.autofit is False
+        assert table_width(table)==sum(table_grid_widths(table))<=available+1
+        for row in table.rows:
             for cell in row.cells:
-                assert cell.vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER
-
-    summary_table = find_table_with_headers(rendered_path, ["等级", "分类", "问题描述", "影响数量", "建议动作"])
-    assert cell_alignment(summary_table.rows[1].cells[0]) == WD_ALIGN_PARAGRAPH.CENTER
-    assert cell_alignment(summary_table.rows[1].cells[1]) == WD_ALIGN_PARAGRAPH.CENTER
-    assert cell_alignment(summary_table.rows[1].cells[2]) == WD_ALIGN_PARAGRAPH.LEFT
+                assert cell.vertical_alignment in (None,WD_CELL_VERTICAL_ALIGNMENT.TOP)
+                assert all(r.font.size is None or r.font.size.pt>=10 for p in cell.paragraphs for r in p.runs if r.text.strip())
+    summary=find_table_with_headers(path,['等级','问题类别','受影响对象'])
+    assert all(cell_alignment(c) in (None,WD_ALIGN_PARAGRAPH.LEFT) for c in summary.rows[1].cells)
 
 
 def test_docx_known_tables_match_feedback_revision_columns(tmp_path: Path) -> None:
-    rendered_path, _, _ = ReportExportEngine().render(table_layout_report(), tmp_path / "report.docx")
-
-    expected_tables = {
-        ("vCenter", "数据中心", "集群", "ESXi 主机", "共享/业务 Datastore", "虚拟机"): [1587, 1587, 1587, 1588, 1588, 1588],
-        ("等级", "分类", "问题描述", "影响数量", "建议动作"): [950, 1400, 2400, 950, 3825],
-        ("名称", "版本", "Build", "连接状态"): [2199, 2200, 2563, 2563],
-        ("主机", "所属集群", "连接状态", "CPU 使用率", "内存使用率"): [1905, 1905, 1905, 1905, 1905],
-        ("Datastore", "类型", "已用", "剩余", "状态"): [1905, 1905, 1905, 1905, 1905],
-        ("集群", "HA 当前状态"): [4762, 4763],
-        ("集群", "DRS 当前状态"): [4762, 4763],
-        ("ESXi 主机", "网卡", "绑定交换机", "链路状态", "实际/配置速率", "判断与建议"): [1500, 900, 1400, 1150, 1850, 2725],
-        ("ESXi 主机", "所属集群", "当前状态"): [3175, 3175, 3175],
-        ("所在虚拟机", "快照名称", "创建时间/存在时长"): [3175, 3175, 3175],
-        ("ESXi 主机", "vSwitch或端口组", "策略项", "当前状态", "建议"): [1531, 2268, 1531, 1531, 2664],
-        ("ESXi 主机", "组件", "健康状态"): [3175, 3175, 3175],
-        ("虚拟机", "Datastore", "所属主机或集群", "影响说明"): [2500, 2200, 2200, 2625],
-        ("虚拟机", "实际操作系统", "配置操作系统"): [2500, 3512, 3513],
-        ("Datastore", "关联集群数", "关联集群", "主机数"): [2600, 1600, 3725, 1600],
-        ("Datastore", "已用率", "剩余容量", "状态"): [2800, 1900, 2200, 2625],
-        ("ESXi 主机", "vCPU:pCPU", "内存分配比例", "当前状态"): [2600, 2300, 2300, 2325],
-        ("对象", "当前状态", "建议"): [2500, 3300, 3725],
-    }
-
-    for headers, widths in expected_tables.items():
-        table = find_table_with_headers(rendered_path, list(headers))
-        assert [cell_width(cell) for cell in table.rows[0].cells] == widths
-
-    snapshot_table = find_table_with_headers(rendered_path, ["所在虚拟机", "快照名称", "创建时间/存在时长"])
-    assert any(row.cells[2].text.strip() for row in snapshot_table.rows[1:])
-
-    text = docx_text(rendered_path)
-    assert "ESXi主机" not in text
-    assert "序号" not in table_headers(find_table_with_headers(rendered_path, ["等级", "分类", "问题描述", "影响数量", "建议动作"]))
+    report=table_layout_report();path,_,_=ReportExportEngine().render(report,tmp_path/'report.docx')
+    from vstacklens.reports.document_model import get_document
+    expected=get_document(report)['visual']['asset_kpis']
+    cards=next(t for t in Document(path).tables if len(t.columns)==4 and
+               [c.paragraphs[0].text for c in t.rows[0].cells]==['集群','主机','虚拟机','数据存储'])
+    assert [c.paragraphs[1].text for c in cards.rows[0].cells]==[x['value'] for x in expected]
+    find_table_with_headers(path,['等级','问题类别','受影响对象'])
+    texts=docx_text(path)
+    for value in ('HA','DRS','快照名称','vCPU:pCPU','数据存储','主机完整清单','虚拟机完整清单'):assert value in texts
+    headers={tuple(table_headers(t)) for t in Document(path).tables}
+    assert not any('vSwitch或端口组' in h or '实际操作系统' in h or '关联集群数' in h for h in headers)
+    assert all('影响说明' not in h and '建议动作' not in h for h in headers)
 
 
 def test_docx_snapshot_rows_omit_uncollected_field_stack(tmp_path: Path) -> None:
@@ -949,14 +893,17 @@ def test_docx_snapshot_rows_omit_uncollected_field_stack(tmp_path: Path) -> None
     ]
 
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "report.docx")
-    snapshot_table = next(table for table in Document(rendered_path).tables if "app-01" in "\n".join(cell.text for row in table.rows for cell in row.cells))
+    from vstacklens.reports.document_model import get_document
+    appendix = next(a for a in get_document(report)['appendices'] if a['id']=='problem-VM-SNAPSHOT')
+    snapshot_table = find_table_with_headers(rendered_path, appendix['headers'])
     row_text = " ".join(cell.text for cell in snapshot_table.rows[1].cells)
 
     assert "快照名称：未采集" not in row_text
     assert "创建时间：未采集" not in row_text
     assert "快照链深度：未采集" not in row_text
-    assert row_text.endswith("未采集")
-    assert "虚拟机存在快照" in row_text
+    assert "未采集" not in row_text
+    assert "app-01" in row_text
+    assert "快照名称" not in table_headers(snapshot_table)
 
 
 def test_vsl_vm_007_collected_snapshot_names_and_times_reach_docx(tmp_path: Path) -> None:
@@ -1000,13 +947,14 @@ def test_vsl_vm_007_collected_snapshot_names_and_times_reach_docx(tmp_path: Path
         )
 
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "snapshot-chain-report.docx")
-    table = find_table_with_headers(rendered_path, ["所在虚拟机", "快照名称", "创建时间/存在时长"])
-    rows = [" ".join(cell.text for cell in row.cells) for row in table.rows[1:]]
-    visible = "\n".join(rows)
-    assert len(rows) == 14
+    visible=docx_text(rendered_path)
+    from vstacklens.reports.document_model import get_document
+    table=next(a for a in get_document(report)['appendices'] if a['id']=='problem-VM-SNAPSHOT')
+    assert len(table['rows'])==4 # One VM per row; all 14 snapshot records stay inside these rows.
     assert all(name in visible for name in expected_names)
-    assert "centos9-备份-勿开" in visible
-    assert "未采集" not in visible
+    assert 'centos9-备份-勿开' in visible and '未采集' not in visible
+    for day in range(11,15):
+        assert datetime.fromisoformat(f'2026-09-{day:02d}T03:11:22+00:00').astimezone().strftime('%Y-%m-%d %H:%M') in visible
 
 
 def test_docx_snapshot_table_falls_back_to_collected_inventory_when_evidence_detail_is_missing(tmp_path: Path) -> None:
@@ -1033,11 +981,11 @@ def test_docx_snapshot_table_falls_back_to_collected_inventory_when_evidence_det
     ]
 
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "snapshot-inventory-fallback.docx")
-    table = find_table_with_headers(rendered_path, ["所在虚拟机", "快照名称", "创建时间/存在时长"])
-    visible = "\n".join(" ".join(cell.text for cell in row.cells) for row in table.rows[1:])
-    assert "inventory-only-snapshot" in visible
-    assert "2026-09-12T08:00:00+00:00" in visible
-    assert "未采集" not in visible
+    visible=docx_text(rendered_path)
+    assert 'inventory-only-snapshot' in visible
+    source_time='2026-09-12T08:00:00+00:00'
+    assert datetime.fromisoformat(source_time).astimezone().strftime('%Y-%m-%d %H:%M') in visible
+    assert vm['properties']['snapshots'][0]['create_time']==source_time and '未采集' not in visible
 
 
 def test_docx_pnic_details_show_binding_link_and_rate_basis(tmp_path: Path) -> None:
@@ -1084,17 +1032,18 @@ def test_docx_pnic_details_show_binding_link_and_rate_basis(tmp_path: Path) -> N
     ]
 
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "pnic-evidence-report.docx")
-    table = find_table_with_headers(
-        rendered_path,
-        ["ESXi 主机", "网卡", "绑定交换机", "链路状态", "实际/配置速率", "判断与建议"],
-    )
-    rows = {row.cells[1].text.strip(): " ".join(cell.text for cell in row.cells) for row in table.rows[1:]}
-    assert "未绑定" in rows["vmnic1"]
-    assert "不按上行链路判故障" in rows["vmnic1"]
-    assert "vSwitch0" in rows["vmnic2"] and "down" in rows["vmnic2"]
-    assert "vSAN-vDS" in rows["vmnic3"]
-    assert "实际 1000 Mbps / 配置 10000 Mbps" in rows["vmnic3"]
-    assert "固定配置速率与实际速率不一致" in rows["vmnic3"]
+    visible=docx_text(rendered_path)
+    from vstacklens.reports.document_model import get_document
+    appendix=next(a for a in get_document(report)['appendices'] if a['id'].startswith('problem-'))
+    assert len(appendix['rows'])==1 # The affected object is the host, not four fake affected hosts.
+    detail='\n'.join(appendix['rows'][0]['cells'])
+    records=detail.splitlines()
+    def line(device):return next(v for v in records if f'网卡：{device}' in v)
+    assert '未绑定' in line('vmnic1') and '不按上行链路判故障' in line('vmnic1')
+    assert 'vSwitch0' in line('vmnic2') and '已断开' in line('vmnic2')
+    assert 'vSAN-vDS' in line('vmnic3') and '实际 1000 Mbps / 配置 10000 Mbps' in line('vmnic3')
+    assert '固定配置速率与实际速率不一致' in line('vmnic3')
+    assert all(device in visible for device in ['vmnic0','vmnic1','vmnic2','vmnic3'])
 
 
 def test_docx_pnic_table_does_not_truncate_collected_adapter_rows(tmp_path: Path) -> None:
@@ -1131,13 +1080,12 @@ def test_docx_pnic_table_does_not_truncate_collected_adapter_rows(tmp_path: Path
     ]
 
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "pnic-all-rows.docx")
-    table = find_table_with_headers(
-        rendered_path,
-        ["ESXi 主机", "网卡", "绑定交换机", "链路状态", "实际/配置速率", "判断与建议"],
-    )
-    assert len(table.rows) - 1 == 12
-    assert any(row.cells[1].text.strip() == "vmnic11" for row in table.rows[1:])
-    assert "其余对象建议在 HTML 报告中进一步查看" not in docx_text(rendered_path)
+    visible=docx_text(rendered_path)
+    assert all(f'vmnic{index}' in visible for index in range(12))
+    assert '其余对象建议在 HTML 报告中进一步查看' not in visible
+    from vstacklens.reports.document_model import get_document
+    appendix=next(a for a in get_document(report)['appendices'] if a['id'].startswith('problem-'))
+    assert len(appendix['rows'])==1 and sum('网卡：' in line for line in '\n'.join(appendix['rows'][0]['cells']).splitlines())==12
 
 
 def test_docx_general_risk_details_are_not_truncated_after_ten_rows(tmp_path: Path) -> None:
@@ -1145,7 +1093,7 @@ def test_docx_general_risk_details_are_not_truncated_after_ten_rows(tmp_path: Pa
     report.findings = [
         FindingItem(
             risk_level="P3",
-            rule_id="TEST-VM-DETAILS",
+            rule_id="VSL-VM-016",
             rule_name="Test virtual machine details",
             title="虚拟机巡检明细测试",
             object_type="VirtualMachine",
@@ -1203,14 +1151,16 @@ def test_docx_vsan_object_and_disk_issue_details_are_not_truncated(tmp_path: Pat
     }
 
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "all-vsan-details.docx")
-    object_table = find_table_with_headers(rendered_path, ["对象/组件", "Health", "说明"])
-    disk_table = find_table_with_headers(rendered_path, ["主机", "设备", "状态", "说明"])
-    assert len(object_table.rows) - 1 == 12
-    assert len(disk_table.rows) - 1 == 12
-    visible = docx_text(rendered_path)
-    assert "vsan-object-11" in visible and "object-detail-11" in visible
-    assert "naa-issue-11" in visible and "disk-detail-11" in visible
-    assert "未取得或未确认的数据不按正常处理" in visible
+    from vstacklens.reports.document_model import get_document
+    document=get_document(report)
+    objects=next(a for a in document['appendices'] if a['id']=='vsan-object-observations')
+    disks=next(a for a in document['appendices'] if a['id']=='vsan-disk-observations')
+    assert len(objects['rows'])==len(disks['rows'])==12
+    visible=docx_text(rendered_path)
+    for index in range(12):
+        assert f'vsan-object-{index:02d}' in visible and f'object-detail-{index:02d}' in visible
+        assert f'naa-issue-{index:02d}' in visible and f'disk-detail-{index:02d}' in visible
+    assert '未取得或未确认的数据不按正常处理' not in visible
 
 
 def test_docx_legacy_pnic_evidence_labels_host_level_switch_mapping(tmp_path: Path) -> None:
@@ -1225,44 +1175,26 @@ def test_docx_legacy_pnic_evidence_labels_host_level_switch_mapping(tmp_path: Pa
     }
 
     rendered_path, _, _ = ReportExportEngine().render(report, tmp_path / "legacy-pnic-evidence.docx")
-    table = find_table_with_headers(
-        rendered_path,
-        ["ESXi 主机", "网卡", "绑定交换机", "链路状态", "实际/配置速率", "判断与建议"],
-    )
-    row = next(row for row in table.rows[1:] if row.cells[1].text.strip() == "vmnic1")
-    text = " ".join(cell.text for cell in row.cells)
-    assert "vSwitch0（主机级映射，未逐卡保存）" in text
-    assert "down" in text
-    assert "旧版证据未记录" in text
+    text=docx_text(rendered_path)
+    assert 'vSwitch0（主机级映射，未逐卡保存）' in text
+    assert '已断开' in text and 'vmnic1' in text
+    assert '旧版证据未记录' not in text
 
 
 def test_docx_fallback_detail_tables_wrap_long_tokens_and_left_align_text(tmp_path: Path) -> None:
     rendered_path, _, _ = ReportExportEngine().render(table_layout_report(), tmp_path / "report.docx")
-    fallback_tables = find_tables_with_headers(rendered_path, ["对象", "当前状态", "建议"])
-
-    assert fallback_tables
-    for table in fallback_tables:
-        assert [cell_width(cell) for cell in table.rows[0].cells] == [2500, 3300, 3725]
-        for row in table.rows[1:]:
-            assert cell_alignment(row.cells[0]) == WD_ALIGN_PARAGRAPH.LEFT
-            assert cell_alignment(row.cells[1]) == WD_ALIGN_PARAGRAPH.LEFT
-            assert cell_alignment(row.cells[2]) == WD_ALIGN_PARAGRAPH.LEFT
+    doc=Document(rendered_path);text=docx_text(rendered_path)
+    assert 'app-resource-config' in text and 'very-long-resource-pool-name-for-validation' not in text
+    xml=doc.element.xml
+    assert 'w:wordWrap' in xml # Use layout properties rather than changing object identity text.
+    for table in doc.tables:
+        for row in table.rows:
             for cell in row.cells:
-                if cell.text.strip():
-                    assert first_run_font_size(cell) == 8.5
-
-    long_name_row = next(
-        row
-        for table in fallback_tables
-        for row in table.rows[1:]
-        if "app-resource-config" in row.cells[0].text.replace("\u200b", "")
-    )
-    # Object identity must remain copyable/searchable; the renderer no longer
-    # injects zero-width break characters into names.
-    assert "\u200b" not in long_name_row.cells[0].text
-    assert long_name_row.cells[1].text.startswith("当前：")
-    assert "very-long-resource-pool-name-for-validation" not in long_name_row.cells[1].text
-    assert len(long_name_row.cells[1].text) < 80
+                assert cell_alignment(cell) in (None,WD_ALIGN_PARAGRAPH.LEFT)
+                for p in cell.paragraphs:
+                    for run in p.runs:
+                        if run.text:assert run.font.size is None or run.font.size.pt>=10
+    assert any('app-resource-config' in c.text for t in doc.tables for row in t.rows for c in row.cells)
 
 
 def test_docx_customer_word_refines_finding_display_terms_and_duplicates(tmp_path: Path) -> None:
@@ -1280,7 +1212,7 @@ def test_docx_customer_word_refines_finding_display_terms_and_duplicates(tmp_pat
     assert "vCLS-" not in text
     assert "VMware vCLS" not in text
 
-    assert "创建时间/存在时长" in text
+    assert "创建时间" in text
     assert "快照保留时间" not in text
     assert "Syslog" not in text
     assert "syslog" not in text.lower()
@@ -1301,8 +1233,9 @@ def test_docx_customer_report_hides_tools_and_syslog_findings_without_mutating_c
     visible_groups = engine._customer_visible_risk_groups(collected_groups)
 
     assert report.findings == original_findings
-    assert any(engine._is_tools_group(group) for group in collected_groups)
-    assert any(engine._is_remote_syslog_group(group) for group in collected_groups)
+    assert any(engine._is_tools_finding(item) for item in original_findings)
+    assert any("Syslog" in item.title for item in original_findings)
+    assert collected_groups == visible_groups
     assert not any(engine._is_tools_group(group) for group in visible_groups)
     assert not any(engine._is_syslog_group(group) for group in visible_groups)
 
@@ -1312,8 +1245,8 @@ def test_docx_customer_report_hides_tools_and_syslog_findings_without_mutating_c
 
     assert "VMware Tools" not in text
     assert "Syslog" not in text
-    assert f"{len(visible_groups)} 类建议关注问题" in text
-    assert f"{visible_detail_count} 条对象明细" in text
+    # Preserve category/object totals and Tools/Syslog isolation after cover de-duplication.
+    assert_docx_summary_cards(rendered_path, len(visible_groups), report.customer_caliber['affected_total'])
 
 
 def test_docx_cpu_ready_finding_uses_metric_units(tmp_path: Path) -> None:
@@ -1348,7 +1281,8 @@ def test_docx_cpu_ready_finding_uses_metric_units(tmp_path: Path) -> None:
 
     assert "CPU Ready" in text
     assert "CPU 调度等待" in text
-    assert "13.19%" in text
+    assert "13.2%" in text
+    assert report.findings[0].current_value == 13.19
     assert "< 5%" in text
     assert "当前值为 13.19，建议状态为 < 5" not in text
     assert re.search(r"当前值[:：]\s*13\.19(?!%)", text) is None
@@ -1356,11 +1290,12 @@ def test_docx_cpu_ready_finding_uses_metric_units(tmp_path: Path) -> None:
 
 
 def test_docx_v2_risk_category_numbering_is_continuous(tmp_path: Path) -> None:
-    rendered_path, _, _ = ReportExportEngine().render(minimal_report(), tmp_path / "report.docx")
-    numbers = risk_category_numbers(docx_headings(rendered_path))
-
-    assert numbers == list(range(1, len(numbers) + 1))
-    assert numbers == [1, 2, 3]
+    from vstacklens.reports.document_model import get_document
+    report=minimal_report();path,_,_=ReportExportEngine().render(report,tmp_path/'report.docx')
+    expected=[p['title'] for s in get_document(report)['sections'] if s['kind']=='problems' for p in s['items']]
+    headings=docx_headings(path)
+    assert [h for h in headings if h in set(expected)]==expected
+    assert len(expected)==2 and not risk_category_numbers(headings)
 
 
 def test_report_recommendations_do_not_use_unavailable_item_wording() -> None:

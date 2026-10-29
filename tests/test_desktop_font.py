@@ -12,7 +12,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QWheelEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QLineEdit, QLabel, QListWidget, QMessageBox, QPushButton, QTextEdit  # noqa: E402
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QLineEdit, QLabel, QListWidget, QMessageBox, QPushButton, QTextEdit, QTableWidget  # noqa: E402
 
 from vstacklens.application import AuthService, CheckEvidenceItem, HistoryAssetChangeItem, HistoryRiskChangeItem, PlatformAssetItem  # noqa: E402
 from vstacklens.desktop import app as desktop_app  # noqa: E402
@@ -46,9 +46,9 @@ def test_desktop_window_offscreen_screenshot_renders_chinese(tmp_path: Path) -> 
     window.show()
     app.processEvents()
 
-    for text in ("仪表盘", "vCenter 管理", "巡检中心", "日志分析", "风险中心", "资产中心", "报告中心", "系统设置", "关于软件"):
+    for text in ("首页", "环境档案", "巡检中心", "日志分析", "风险中心", "资产中心", "报告中心", "系统设置", "关于软件"):
         assert window.nav.findItems(text, Qt.MatchExactly)
-    assert window.nav.currentItem().text() == "仪表盘"
+    assert window.nav.currentItem().text() == "首页"
 
     pixmap = window.grab()
     path = tmp_path / "desktop-font-smoke.png"
@@ -77,8 +77,8 @@ def test_desktop_navigation_switches_to_new_primary_pages() -> None:
     app.processEvents()
 
     expected = {
-        "dashboard": "仪表盘",
-        "vcenter_management": "vCenter 管理",
+        "dashboard": "首页",
+        "vcenter_management": "环境档案",
         "inspection_center": "巡检中心",
         "log_analysis": "日志分析",
         "risk_center": "风险中心",
@@ -104,15 +104,16 @@ def test_productized_ui_exposes_dashboard_risk_report_and_planned_boundaries() -
     app.processEvents()
 
     assert window.findChild(RiskTrendChart) is not None
-    assert isinstance(window.risk_list, QListWidget)
-    assert isinstance(window.report_list, QListWidget)
+    assert isinstance(window.risk_list, QTableWidget)
+    assert [window.risk_list.horizontalHeaderItem(i).text() for i in range(3)] == ["等级", "问题", "对象数"]
+    assert isinstance(window.report_list, QTableWidget)
     assert isinstance(window.dashboard_certificate_detail, QTextEdit)
     assert isinstance(window.dashboard_certificate_toggle, QPushButton)
     assert isinstance(window.baseline_run_combo, QComboBox)
     assert isinstance(window.comparison_run_combo, QComboBox)
     assert isinstance(window.history_risk_filter, QComboBox)
-    assert isinstance(window.history_risk_list, QListWidget)
-    assert isinstance(window.history_asset_list, QListWidget)
+    assert isinstance(window.history_risk_list, QTableWidget)
+    assert isinstance(window.history_asset_list, QTableWidget)
 
     assert "ai_center" not in window.module_index
     assert "template_center" not in window.module_index
@@ -120,11 +121,11 @@ def test_productized_ui_exposes_dashboard_risk_report_and_planned_boundaries() -
     window.go_to_module("report_center")
     app.processEvents()
     buttons = window.pages.currentWidget().findChildren(QPushButton)
-    pdf_buttons = [button for button in buttons if button.text() == "打开 PDF 报告"]
+    pdf_buttons = [button for button in buttons if button is window.report_pdf_button]
     assert pdf_buttons
     assert all(button.isEnabled() is False for button in pdf_buttons)
     assert not any("PPT" in button.text() for button in buttons)
-    assert window.report_word_button.text() == "打开 Word 报告"
+    assert window.report_word_button.text() == "打开"
 
 
 def test_desktop_combo_boxes_ignore_mouse_wheel_changes() -> None:
@@ -214,12 +215,12 @@ def test_history_pagination_and_asset_categories_use_the_full_data_set() -> None
     window._render_history_page("risk")
     window._render_history_page("asset")
 
-    assert window.history_risk_list.count() == 50
-    assert window.history_asset_list.count() == 50
+    assert window.history_risk_list.rowCount() == 50
+    assert window.history_asset_list.rowCount() == 50
     window._change_history_page("risk", 2)
     window._change_history_page("asset", 3)
-    assert window.history_risk_list.count() == 21
-    assert window.history_asset_list.count() == 11
+    assert window.history_risk_list.rowCount() == 21
+    assert window.history_asset_list.rowCount() == 11
     assert "第 3 / 3 页" in window.history_risk_page_label.text()
     assert "第 4 / 4 页" in window.history_asset_page_label.text()
 
@@ -233,7 +234,7 @@ def test_history_pagination_and_asset_categories_use_the_full_data_set() -> None
     window.asset_type_filter.setCurrentText("全部对象")
     window._populate_asset_table()
     assert "全部对象 102" in window.asset_category_buttons["全部对象"].text()
-    assert "VM 97" in window.asset_category_buttons["VM"].text()
+    assert "虚拟机 97" in window.asset_category_buttons["VM"].text()
     window._select_asset_category("ESXi")
     assert window.asset_table.rowCount() == 5
     window.close()
@@ -277,15 +278,16 @@ def test_inspection_form_hides_ssl_and_port_options() -> None:
     visible_text.extend(box.text() for box in page.findChildren(QCheckBox))
     text = "\n".join(visible_text)
 
-    assert "vCenter 地址" in text
+    assert "vCenter 连接" in text
+    assert "地址" in text
     assert "用户名" in text
     assert "密码" in text
     assert "客户名称" in text
     assert "报告名称" in text
     assert "报告输出目录" in text
     assert "SSL" not in text
-    assert "证书校验" not in text
-    assert "端口" not in text
+    assert window.connection_fold.body.isHidden()
+    assert "端口" not in "\n".join(label.text() for label in page.findChildren(QLabel) if label.isVisible())
     assert not hasattr(window, "ssl_no_verify_input")
     assert not hasattr(window, "port_input")
     window.close()
@@ -341,9 +343,9 @@ def test_log_analysis_form_is_independent_from_vcenter_inspection_fields() -> No
 
     assert "日志包" in text
     assert "问题描述" in text
-    assert "客户名称" in text
+    assert "客户" in text
     assert "报告名称" in text
-    assert "报告输出目录" in text
+    assert "输出目录" in text
     assert "vCenter 地址" not in text
     assert "用户名" not in text
     assert "密码" not in text
@@ -363,7 +365,7 @@ def test_login_window_accepts_default_account_and_rejects_bad_password(tmp_path:
     login.show()
     app.processEvents()
 
-    assert login.windowTitle() == "VStackLens Health Assessment Platform"
+    assert login.windowTitle() == "VStackLens · 虚拟化巡检工作台"
     assert login.username_input.text() == "admin"
     assert "admin" not in login.password_input.placeholderText().lower()
     assert login.password_input.echoMode() == QLineEdit.Password
@@ -430,7 +432,7 @@ def test_customer_visible_desktop_copy_avoids_commercial_and_engineering_terms()
     window.close()
 
 
-def test_inspection_center_exposes_cancel_button_and_moves_planned_actions_to_text() -> None:
+def test_inspection_center_keeps_cancel_and_exposes_authorized_entries() -> None:
     app = _app()
     configure_chinese_font(app)
     window = MainWindow()
@@ -445,7 +447,8 @@ def test_inspection_center_exposes_cancel_button_and_moves_planned_actions_to_te
     assert not buttons["取消巡检"].isVisible()
     assert "批量巡检（后续版本）" not in buttons
     assert "计划巡检（后续版本）" not in buttons
-    assert "后续能力路线图" in labels
+    assert "后续能力路线图" not in labels
+    assert "开始标准巡检" in buttons
     assert "批量巡检" in labels
     assert "计划巡检" in labels
     window.close()
@@ -494,8 +497,13 @@ def test_close_event_requests_cooperative_cancel(monkeypatch: pytest.MonkeyPatch
 
     assert worker.cancel_requested is True
     assert worker.interruption_requested is False
-    assert event.accepted is True
-    assert event.ignored is False
+    assert event.ignored is True  # Async close waits for actual thread completion, not a claimed wait result.
+    window.worker = None
+    window._finish_safe_close()
+    completed_event = FakeEvent()
+    window.closeEvent(completed_event)
+    assert completed_event.accepted is True
+    assert completed_event.ignored is False
     assert "等待当前步骤结束" in window.status_label.text()
     window.close()
 
@@ -511,8 +519,9 @@ def test_report_center_exposes_pdf_reader_but_not_ppt_capability() -> None:
     buttons = {button.text(): button for button in window.pages.currentWidget().findChildren(QPushButton)}
     labels = "\n".join(label.text() for label in window.pages.currentWidget().findChildren(QLabel))
 
-    assert "打开 PDF 报告" in buttons
-    assert buttons["打开 PDF 报告"].isEnabled() is False
+    assert window.report_pdf_button in window.pages.currentWidget().findChildren(QPushButton)
+    assert window.report_pdf_button.text()=="打开"
+    assert window.report_pdf_button.isEnabled() is False
     assert not any("PPT" in text for text in buttons)
     assert "PDF" not in labels
     assert "PPT" not in labels
@@ -566,7 +575,7 @@ def test_default_password_warning_is_dismissible_and_does_not_block_main_window(
     window.show_default_password_warning_if_needed()
 
     assert calls == ["shown"]
-    assert window.module_descriptors[window.nav.currentRow()].module_id == "inspection_center"
+    assert window.nav.currentItem().data(Qt.UserRole) == "inspection_center"
     assert window.start_button.isEnabled()
     window.close()
 

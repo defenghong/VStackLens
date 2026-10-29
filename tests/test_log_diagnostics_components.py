@@ -37,18 +37,18 @@ def test_timeline_builder_sorts_mixed_datetime_formats() -> None:
 
 def test_problem_parser_filters_object_noise_and_keeps_real_objects() -> None:
     profile = ProblemParser().parse(
-        "After network failed for esx-host-01 on vmnic3 and vmk2, host 10.240.3.20 could not reach naa.6000 and SQL-0001-000001.vmdk."
+        "After network failed for example-vm-01 on vmnic3 and vmk2, host 10.10.10.20 could not reach naa.6000 and SQL-0001-000001.vmdk."
     )
 
-    assert profile["primary_object"] == "esx-host-01"
+    assert profile["primary_object"] == "example-vm-01"
     assert "the" not in profile["objects"]
     assert "after" not in profile["objects"]
     assert "failed" not in profile["objects"]
     assert "network" not in profile["objects"]
-    assert "esx-host-01" in profile["objects"]
+    assert "example-vm-01" in profile["objects"]
     assert "vmnic3" in profile["objects"]
     assert "vmk2" in profile["objects"]
-    assert "10.240.3.20" in profile["objects"]
+    assert "10.10.10.20" in profile["objects"]
     assert "naa.6000" in profile["objects"]
     assert "SQL-0001-000001.vmdk" in profile["objects"]
 

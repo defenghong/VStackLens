@@ -1333,6 +1333,10 @@ def test_deep_history_accumulates_and_resolves_findings(tmp_path: Path) -> None:
         row = conn.execute("SELECT status, lifecycle_json FROM deep_finding_history WHERE finding_id = ?", (first_finding.finding_id,)).fetchone()
         assert row[0] == "OPEN"
         assert json.loads(row[1])["verification_status"] == "UNVERIFIED"
+    unverified_snapshot = store.lifecycle_snapshot("vc-fixture")
+    unverified_item = next(item for item in unverified_snapshot["entries"] if item["finding_id"] == first_finding.finding_id)
+    assert unverified_item["status"] == "OPEN"
+    assert unverified_item["verification_status"] == "UNVERIFIED"
 
     resolved_dataset = second.model_copy(
         update={
@@ -1354,8 +1358,14 @@ def test_deep_history_accumulates_and_resolves_findings(tmp_path: Path) -> None:
     store.record(resolved_dataset, resolved_analysis)
     with __import__("sqlite3").connect(tmp_path / "deep-history.db") as conn:
         row = conn.execute("SELECT status, lifecycle_json FROM deep_finding_history WHERE finding_id = ?", (first_finding.finding_id,)).fetchone()
-        assert row[0] == "RESOLVED"
-        assert json.loads(row[1])["verification_status"] == "CONFIRMED_RESOLVED"
+        assert row[0] == "OPEN"
+        assert json.loads(row[1])["verification_status"] == "UNVERIFIED"
+    resolved_snapshot = store.lifecycle_snapshot("vc-fixture")
+    resolved_item = next(item for item in resolved_snapshot["entries"] if item["finding_id"] == first_finding.finding_id)
+    # Merely editing the aggregate rule status cannot manufacture object PASS evidence.
+    assert resolved_item["status"] == "OPEN"
+    assert resolved_item["verification_status"] == "UNVERIFIED"
+    assert resolved_snapshot["status_counts"]["RESOLVED"] == 0
 
 
 def test_deep_replay_orders_datasets_and_builds_30_90_day_history(tmp_path: Path) -> None:
@@ -3349,11 +3359,13 @@ def test_network_correlation_prefers_same_interface_and_state_and_reports_basis(
     assert "共现不代表因果" not in report_lines[0]
 
 
-def test_sanitized_real_support_bundle_event_correlation_replays_expected_links() -> None:
+def test_reconstructed_real_support_metadata_produces_expected_network_links() -> None:
     import json
 
     fixture_path = Path(__file__).parent / "fixtures" / "deep_support_bundle_correlation_sanitized.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert fixture["raw_support_bundle_available"] is False
+    assert fixture["raw_log_messages_included"] is False
     entity = DeepEntity(type="HostSystem", stable_id=fixture["stable_id"], display_ref="matched-r4-host")
     normalized_lines = [
         f"{item['timestamp']} {item['interface']} linkstate {item['state']}"
@@ -3395,6 +3407,7 @@ def test_sanitized_real_support_bundle_event_correlation_replays_expected_links(
         for item in fixture["expected_links"]
     }
     assert actual == expected
+    assert all("dataset_pointer" not in item for item in records[0].metadata["related_event_samples"])
 
 
 def test_log_event_task_performance_chain_keeps_all_sources() -> None:

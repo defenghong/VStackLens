@@ -16,6 +16,7 @@ from typing import Any
 
 from vstacklens.application.cloud_log_diagnosis import DEFAULT_CLOUD_API_URL, DEFAULT_CLOUD_MODEL, DEFAULT_CLOUD_PROVIDER
 from vstacklens.application.inspection_runner import InspectionRunner, RunnerCancelledError, VCenterRunRequest
+from vstacklens.application.connection_probe import redact_sensitive
 from vstacklens.application.logging_config import get_logger, sensitive_text_summary
 from vstacklens.application.log_analysis_service import (
     DEFAULT_LOG_ANALYSIS_TITLE,
@@ -105,7 +106,7 @@ class ModelConfigProfile:
 class DesktopInspectionConfig:
     vcenter: str = ""
     username: str = ""
-    password: str = ""
+    password: str = field(default="", repr=False)
     port: int = 443
     ssl_no_verify: bool = False
     customer_name: str = ""
@@ -119,6 +120,8 @@ class DesktopInspectionConfig:
     previous_run_id: str | None = None
     model_config_profiles: list[ModelConfigProfile] = field(default_factory=list)
     security_privacy_level: str = "standard"
+    ui_theme: str = "light"
+    environment_id: str | None = None
 
     def normalized(self) -> "DesktopInspectionConfig":
         profiles = [item.normalized() for item in self.model_config_profiles if isinstance(item, ModelConfigProfile)]
@@ -141,6 +144,8 @@ class DesktopInspectionConfig:
             previous_run_id=self.previous_run_id,
             model_config_profiles=profiles,
             security_privacy_level=(self.security_privacy_level or "standard").strip() or "standard",
+            ui_theme=self.ui_theme if self.ui_theme in ("dark", "light") else "light",
+            environment_id=self.environment_id,
         )
 
 
@@ -167,6 +172,13 @@ class InspectionRunResult:
     pdf_path: Path | None = None
     pdf_error: str | None = None
     html_error: str | None = None
+    delivery_error: str | None = None
+    customer_caliber: dict[str, Any] = field(default_factory=dict)
+    # Carry the verified terminal outcome through the worker's completed signal.
+    # QThread.finished only indicates that the worker has stopped executing.
+    state: InspectionState = InspectionState.COMPLETED
+    stage: str = "success"
+    error: str | None = None
 
 
 class InspectionCancelledError(RuntimeError):
@@ -190,6 +202,8 @@ class ReportHistoryItem:
     finished_at: str | None
     updated_at: str | None
     error_message: str | None
+    customer_caliber: dict[str, Any] = field(default_factory=dict)
+    health_status: str = ""
 
 
 @dataclass(slots=True)
@@ -224,6 +238,8 @@ class PlatformFindingItem:
     has_structured_evidence: bool
     status: str
     last_seen_at: str
+    non_report_reason: str = ""
+    category_id: str = ""
 
 
 @dataclass(slots=True)
@@ -271,6 +287,9 @@ class DashboardData:
     risk_trend: list[dict[str, Any]]
     top_risks: list[PlatformFindingItem]
     recent_reports: list[ReportHistoryItem]
+    customer_caliber: dict[str, Any] = field(default_factory=dict)
+    finished_at: str | None = None
+    run_status: str = ""
 
 
 @dataclass(slots=True)
@@ -382,6 +401,7 @@ class ReportCenterItem:
     status: str
     report_type: str
     path_hint: str
+    customer_caliber: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -409,6 +429,17 @@ class InspectionService:
         self.log_analysis_service = log_analysis_service or LogAnalysisService()
         self.upgrade_compat_service = upgrade_compat_service or UpgradeCompatService()
         self._progress = InspectionProgress()
+        self._customer_caliber_cache: dict[tuple, dict[str, Any]] = {}
+
+    def get_customer_caliber(self, db_path: Path, run_id: str) -> dict[str, Any]:
+        from vstacklens.application.caliber_reader import load_run
+        db = Path(db_path)
+        signature = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else (0, 0)
+                          for p in (db, Path(str(db) + "-wal")))
+        key = (str(db.resolve()), run_id, signature)
+        if key not in self._customer_caliber_cache:
+            self._customer_caliber_cache[key] = load_run(db, run_id)
+        return self._customer_caliber_cache[key]
 
     def initialize_local_workspace(self) -> DesktopInspectionConfig:
         """Create first-run local folders and a password-free default config."""
@@ -539,6 +570,7 @@ class InspectionService:
         cfg = config.normalized()
         payload = asdict(cfg)
         payload.pop("password", None)
+        payload.pop("environment_id", None)  # Selection and credentials remain session scoped.
         for key in ("report_output_dir", "db_path", "rulepack_path"):
             payload[key] = str(payload[key])
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -581,7 +613,9 @@ class InspectionService:
             previous_run_id=self._optional_string_config_value(payload, "previous_run_id"),
             model_config_profiles=self._model_profiles_config_value(payload.get("model_config_profiles")),
             security_privacy_level=self._string_config_value(payload, "security_privacy_level", "standard"),
+            ui_theme=self._string_config_value(payload, "ui_theme", "light"),
         )
+        config.ui_theme = config.ui_theme if config.ui_theme in ("dark", "light") else "light"
         repaired = self._repair_missing_rulepack_path(config)
         if repaired != config:
             self.save_config(repaired)
@@ -684,6 +718,7 @@ class InspectionService:
             password=cfg.password,
             port=cfg.port,
             ssl_no_verify=cfg.ssl_no_verify,
+            environment_id=cfg.environment_id,
             customer_name=cfg.customer_name,
             site_name=cfg.site_name,
             report_output_dir=cfg.report_output_dir,
@@ -696,6 +731,9 @@ class InspectionService:
         )
 
     def get_progress(self, db_path: Path | None = None, run_id: str | None = None) -> InspectionProgress:
+        if (run_id == self._progress.run_id and self._progress.state == InspectionState.RUNNING
+                and self._progress.stage == "finalizing"):
+            return self._progress
         if db_path and run_id and Path(db_path).exists():
             with connect(Path(db_path)) as conn:
                 row = conn.execute(
@@ -718,12 +756,13 @@ class InspectionService:
         config: DesktopInspectionConfig,
         progress_callback: Callable[[InspectionProgress], None] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
+        *, persist_config: bool = True, execution_owner: str | None = None,
+        identity_validator: Callable[[str], None] | None = None, known_secrets: tuple[str, ...] = (),
     ) -> InspectionRunResult:
         cfg = config.normalized()
         LOGGER.info(
-            "vCenter inspection requested vcenter=%s username=%s ssl_no_verify=%s db_path=%s report_dir=%s",
+            "vCenter inspection requested vcenter=%s ssl_no_verify=%s db_path=%s report_dir=%s",
             cfg.vcenter,
-            cfg.username,
             cfg.ssl_no_verify,
             cfg.db_path,
             cfg.report_output_dir,
@@ -741,10 +780,10 @@ class InspectionService:
             self._emit_progress(progress_callback)
             raise ValueError(self._progress.error)
 
-        self.save_config(cfg)
+        if persist_config:
+            self.save_config(cfg)
         self._progress = InspectionProgress(state=InspectionState.VALIDATING, stage="loading_rules", percent=5, message="加载健康基线")
         self._emit_progress(progress_callback)
-        self._raise_if_cancelled(cancel_requested)
         request = VCenterRunRequest(
             db_path=cfg.db_path,
             rulepack_path=cfg.rulepack_path,
@@ -762,12 +801,17 @@ class InspectionService:
             password=cfg.password,
             port=cfg.port,
             ssl_no_verify=cfg.ssl_no_verify,
+            environment_id=cfg.environment_id,
+            execution_owner=execution_owner,
+            identity_validator=identity_validator,
+            known_secrets=known_secrets,
         )
         try:
+            self._raise_if_cancelled(cancel_requested)
             LOGGER.info("vCenter inspection connecting vcenter=%s ssl_no_verify=%s", cfg.vcenter, cfg.ssl_no_verify)
             result = self.runner.run_vcenter(
                 request,
-                progress=lambda stage, percent: self._set_progress(stage, percent, progress_callback, cancel_requested),
+                progress=lambda stage, percent: self._set_progress(stage, percent, progress_callback),
                 cancel_requested=cancel_requested,
             )
             self._raise_if_cancelled(cancel_requested)
@@ -782,6 +826,8 @@ class InspectionService:
                 pdf_path=result.pdf_path,
                 pdf_error=result.pdf_error,
                 html_error=result.html_error,
+                delivery_error=result.delivery_error,
+                cancel_requested=cancel_requested,
             )
             LOGGER.info(
                 "vCenter inspection completed run_id=%s report=%s docx=%s pdf=%s",
@@ -793,30 +839,40 @@ class InspectionService:
             return completed
         except (InspectionCancelledError, RunnerCancelledError) as exc:
             LOGGER.info("vCenter inspection cancelled vcenter=%s run_id=%s stage=%s", cfg.vcenter, self._progress.run_id, self._progress.stage)
+            cancelled_percent = min(self._progress.percent, 99)
+            if self._progress.run_id and Path(cfg.db_path).is_file():
+                from vstacklens.db.repositories import update_run
+                with connect(cfg.db_path) as conn:
+                    update_run(conn, self._progress.run_id, "cancelled", "cancelled", cancelled_percent, "巡检已取消。")
             self._progress = InspectionProgress(
                 state=InspectionState.CANCELLED,
                 run_id=self._progress.run_id,
                 stage="cancelled",
-                percent=100,
+                percent=cancelled_percent,
                 message="巡检已取消",
                 error=str(exc),
             )
             self._emit_progress(progress_callback)
             raise
         except Exception as exc:
-            LOGGER.exception("vCenter inspection failed vcenter=%s stage=%s", cfg.vcenter, self._progress.stage)
+            from vstacklens.collection.diagnostics import exception_details
+            LOGGER.error("vCenter inspection failed diagnostic=%s", exception_details(exc, secrets=(cfg.password, *known_secrets), context=self._progress.stage))
+            if self._progress.run_id and Path(cfg.db_path).is_file():
+                from vstacklens.db.repositories import update_run
+                with connect(cfg.db_path) as conn:
+                    update_run(conn, self._progress.run_id, "failed", self._progress.stage, 100, redact_sensitive(exc, cfg.password, *known_secrets)[:1000])
             self._progress = InspectionProgress(
                 state=InspectionState.FAILED,
                 run_id=self._progress.run_id,
                 stage=self._progress.stage,
                 percent=100,
                 message="巡检失败",
-                error=str(exc),
+                error=redact_sensitive(exc, cfg.password, *known_secrets),
             )
             self._emit_progress(progress_callback)
             raise
 
-    def list_report_history(self, db_path: Path, limit: int = 50) -> list[ReportHistoryItem]:
+    def list_report_history(self, db_path: Path, limit: int = 50, *, environment_id: str | None = None) -> list[ReportHistoryItem]:
         db = Path(db_path)
         if not db.exists():
             return []
@@ -842,15 +898,19 @@ class InspectionService:
                     ORDER BY COALESCE(rep2.generated_at, rep2.updated_at, rep2.created_at) DESC
                     LIMIT 1
                   )
+                WHERE (? IS NULL OR r.vcenter_id=?)
                 ORDER BY COALESCE(rep.generated_at, r.updated_at, r.created_at) DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (environment_id, environment_id, limit),
             ).fetchall()
         result: list[ReportHistoryItem] = []
         for row in rows:
             risk_summary = self._risk_summary_from_json(row["risk_category_summary_json"] or row["risk_summary_json"])
             report_path = Path(row["report_path"]) if row["report_path"] else None
+            caliber = self.get_customer_caliber(db, row["run_id"])
+            if caliber["state"] == "complete":
+                risk_summary = caliber["counts"]
             result.append(
                 ReportHistoryItem(
                     run_id=row["run_id"],
@@ -868,6 +928,7 @@ class InspectionService:
                     finished_at=row["finished_at"],
                     updated_at=row["updated_at"],
                     error_message=row["error_message"],
+                    customer_caliber=caliber, health_status=caliber["health"]["label"],
                 )
             )
         return result
@@ -1042,7 +1103,40 @@ class InspectionService:
             message="评估基线校验通过，当前基线可用于巡检。",
         )
 
-    def get_dashboard_data(self, db_path: Path) -> DashboardData:
+    def get_latest_valid_desktop_data(self, db_path: Path, *, environment_id: str | None = None) -> DashboardData:
+        """Read the most recent completed standard run with actual base observations."""
+        db = Path(db_path)
+        if db.exists():
+            try:
+                with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+                    row = conn.execute("""SELECT r.run_id FROM inspection_runs r
+                        WHERE r.run_status='success' AND (? IS NULL OR r.vcenter_id=?)
+                        AND EXISTS (SELECT 1 FROM inventory_objects o WHERE o.run_id=r.run_id)
+                        AND EXISTS (SELECT 1 FROM rule_results rr WHERE rr.run_id=r.run_id AND rr.result_status IN ('passed','failed'))
+                        ORDER BY COALESCE(r.finished_at,r.updated_at,r.created_at) DESC LIMIT 1""", (environment_id, environment_id)).fetchone()
+                if row:
+                    data = self.get_dashboard_data(db, run_id=row[0])
+                    if environment_id is None:
+                        data.recent_reports = self.list_report_history(db, limit=8)
+                    return data
+            except sqlite3.Error:
+                pass
+        return self.get_dashboard_data(db, run_id="")
+
+    def desktop_report_formats(self, db_path: Path, run_id: str) -> dict[str, Path]:
+        db = Path(db_path)
+        if not db.exists() or not run_id:
+            return {}
+        try:
+            with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+                rows = conn.execute("SELECT report_type,file_path FROM reports WHERE run_id=? AND report_status='success'", (run_id,)).fetchall()
+            labels = {"html_package": "HTML", "docx": "Word", "pdf": "PDF"}
+            found = {labels[k]: Path(p) for k, p in rows if k in labels and p and Path(p).is_file()}
+            return {name: found[name] for name in ("HTML", "Word", "PDF") if name in found}
+        except sqlite3.Error:
+            return {}
+
+    def get_dashboard_data(self, db_path: Path, *, run_id: str | None = None) -> DashboardData:
         db = Path(db_path)
         default = DashboardData(
             has_data=False,
@@ -1063,12 +1157,15 @@ class InspectionService:
             return default
         try:
             with connect(db) as conn:
-                run = self._latest_run_row(conn)
+                run = self._latest_run_row(conn) if run_id is None else conn.execute("""SELECT r.*,c.customer_name,s.site_name,v.host AS vcenter_host
+                    FROM inspection_runs r JOIN customers c ON c.customer_id=r.customer_id
+                    JOIN sites s ON s.site_id=r.site_id JOIN vcenters v ON v.vcenter_id=r.vcenter_id WHERE r.run_id=?""", (run_id,)).fetchone()
                 if not run:
                     return default
-                risk_summary = self._risk_summary_from_json(run["risk_category_summary_json"] or run["risk_summary_json"])
+                caliber = self.get_customer_caliber(db, run["run_id"])
+                risk_summary = caliber["counts"] or self._risk_summary_from_json(run["risk_category_summary_json"] or run["risk_summary_json"])
                 assets = self._asset_summary_for_run(conn, run["run_id"])
-                trend = self._risk_trend(conn)
+                trend = self._risk_trend(conn, run_id=run_id)
                 top_risks = self.list_platform_findings(db, run["run_id"])[:10]
                 health_impact = self._health_impact_for_run(conn, run["run_id"])
             return DashboardData(
@@ -1078,43 +1175,56 @@ class InspectionService:
                 site_name=run["site_name"] or "",
                 vcenter=run["vcenter_host"] or "",
                 score=run["score"],
-                health_status=self._health_status(run["score"], risk_summary, health_impact),
+                health_status=caliber["health"]["label"],
                 risk_summary=risk_summary,
                 health_impact=health_impact,
                 asset_summary=assets,
                 risk_trend=trend,
                 top_risks=top_risks,
-                recent_reports=self.list_report_history(db, limit=8),
+                recent_reports=self.list_report_history(db, limit=8, environment_id=run["vcenter_id"] if run_id is not None else None),
+                customer_caliber=caliber,
+                finished_at=run["finished_at"] or run["updated_at"] or run["created_at"], run_status=run["run_status"],
             )
         except sqlite3.Error:
             return default
 
-    def list_platform_findings(self, db_path: Path, run_id: str | None = None) -> list[PlatformFindingItem]:
+    def list_platform_findings(self, db_path: Path, run_id: str | None = None, *, include_non_reported: bool = False) -> list[PlatformFindingItem]:
+        from vstacklens.reports.customer_caliber import object_key
+        from vstacklens.reports.rule_provenance import recorded_rule
         db = Path(db_path)
         if not db.exists():
             return []
-        try:
-            with connect(db) as conn:
-                target_run_id = run_id or self._latest_run_id(conn)
-                if not target_run_id:
-                    return []
-                rows = conn.execute(
-                    """
-                    SELECT f.*, rr.evidence_json, rr.observed_value, rr.expected_value, rr.raw_json, rr.evaluated_at, rr.object_path, r.rule_name, r.definition_json
-                    FROM findings f
-                    JOIN rule_results rr ON rr.result_id = f.latest_result_id
-                    LEFT JOIN rules r ON r.rule_id = f.rule_id
-                    WHERE f.last_seen_run_id = ? AND f.status != 'exception'
-                      AND f.risk_level IN ('P1', 'P2', 'P3')
-                    ORDER BY
-                      CASE f.risk_level WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 WHEN 'P4' THEN 4 ELSE 5 END,
-                      f.updated_at DESC
-                    """,
-                    (target_run_id,),
-                ).fetchall()
-        except sqlite3.Error:
+        if not run_id:
+            import sqlite3
+            with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+                row = conn.execute("SELECT run_id FROM inspection_runs ORDER BY COALESCE(finished_at, updated_at, created_at) DESC LIMIT 1").fetchone()
+            run_id = str(row[0]) if row else ""
+        caliber = self.get_customer_caliber(db, run_id)
+        if caliber["state"] != "complete" and not caliber.get("findings"):
             return []
-        return [self._platform_finding_from_row(row) for row in rows]
+        rows = []
+        for group in caliber["categories"]:
+            sources = [x for x in caliber["findings"] if x["category_id"] == group["category_id"]]
+            for obj in group["affected_objects"]:
+                matches = [x for x in sources if object_key(x) == (obj["object_type"], obj["object_key"])]
+                item = dict(min(matches, key=lambda x: {"P1": 0, "P2": 1, "P3": 2}[x["risk_level"]]))
+                item.update(title=group["title"], risk_level=obj["risk_level"], category_id=group["category_id"])
+                rows.append(item)
+        if include_non_reported:
+            rows.extend(caliber["non_reported"])
+        output = []
+        for item in rows:
+            rule = recorded_rule(item)
+            row = {**item, "finding_id": item.get("result_id") or item.get("finding_id") or f"{item['rule_id']}:{object_key(item)}",
+                   "definition_json": json.dumps(rule, ensure_ascii=False), "evidence_json": json.dumps(item.get("evidence", {}), ensure_ascii=False),
+                   "raw_json": json.dumps(item.get("raw_evidence", {}), ensure_ascii=False), "observed_value": item.get("current_value"),
+                   "expected_value": item.get("expected_value"), "last_seen_at": item.get("collected_at", ""), "status": item.get("status", "open")}
+            converted = self._platform_finding_from_row(row)
+            converted.title = item.get("title", converted.title)
+            converted.non_report_reason = item.get("non_report_reason", "")
+            converted.category_id = item.get("category_id", "")
+            output.append(converted)
+        return output
 
     def list_certificate_license_evidence(self, db_path: Path, run_id: str | None = None) -> list[CheckEvidenceItem]:
         db = Path(db_path)
@@ -1310,6 +1420,7 @@ class InspectionService:
         db_path: Path,
         baseline_run_id: str | None = None,
         comparison_run_id: str | None = None,
+        *, environment_id: str | None = None,
     ) -> HistoryComparison:
         db = Path(db_path)
         if not db.exists():
@@ -1322,6 +1433,15 @@ class InspectionService:
             )
         try:
             with connect(db) as conn:
+                if environment_id:
+                    for selected in (baseline_run_id, comparison_run_id):
+                        if selected and not conn.execute("SELECT 1 FROM inspection_runs WHERE run_id=? AND vcenter_id=?", (selected, environment_id)).fetchone():
+                            return self._history_comparison_from_dict({"state": "run_unavailable", "run_options": [], "summary_text": "所选记录不属于当前环境，不能比较。"})
+                    if not comparison_run_id:
+                        latest = conn.execute("SELECT run_id FROM inspection_runs WHERE vcenter_id=? AND run_status='success' ORDER BY COALESCE(finished_at,updated_at,created_at) DESC LIMIT 1", (environment_id,)).fetchone()
+                        if not latest:
+                            return self._history_comparison_from_dict({"state": "empty", "run_options": [], "summary_text": "该环境尚无成功巡检记录，无法进行历史对比。"})
+                        comparison_run_id = latest[0]
                 payload = HistoryComparisonBuilder().build(conn, baseline_run_id, comparison_run_id)
         except sqlite3.Error:
             payload = {
@@ -1337,7 +1457,10 @@ class InspectionService:
         report_root: Path | None = None,
         limit: int = 80,
         compat_db_path: Path | None = None,
+        *, environment_id: str | None = None,
     ) -> list[ReportCenterItem]:
+        if environment_id:
+            return self._environment_report_packages(db_path, environment_id, limit)
         packages: dict[tuple[str, str], ReportCenterItem] = {}
         ignored_paths = self._ignored_report_path_keys(db_path)
         try:
@@ -1438,6 +1561,43 @@ class InspectionService:
         result = [item for item in grouped if self._report_item_path_key(item) not in ignored_paths]
         result.sort(key=lambda item: item.assessment_time or str(item.report_dir.stat().st_mtime if item.report_dir.exists() else ""), reverse=True)
         return result[:limit]
+
+    def list_environment_archives(self, db_path: Path):
+        from vstacklens.application.environment_archive import list_archives
+        try:
+            return list_archives(db_path)
+        except sqlite3.Error:
+            return []
+
+    def list_environment_customers(self, db_path: Path):
+        from vstacklens.application.environment_archive import list_customers
+        return list_customers(db_path)
+
+    def save_environment_archive(self, db_path: Path, **fields) -> str:
+        from vstacklens.application.environment_archive import save_archive
+        return save_archive(db_path, **fields)
+
+    def set_environment_enabled(self, db_path: Path, environment_id: str, enabled: bool):
+        from vstacklens.application.environment_archive import set_enabled
+        return set_enabled(db_path, environment_id, enabled)
+
+    def environment_run_ids(self, db_path: Path, environment_id: str):
+        from vstacklens.application.environment_archive import run_ids
+        return run_ids(db_path, environment_id)
+
+    def _environment_report_packages(self, db_path: Path, environment_id: str, limit: int):
+        """Only registered standard reports; never guess ownership by a shared IP."""
+        db = Path(db_path)
+        if not db.exists():
+            return []
+        histories = {r.run_id: r for r in self.list_report_history(db, limit=limit, environment_id=environment_id)}
+        with connect(db) as conn:
+            rows = conn.execute("""SELECT rep.* FROM reports rep JOIN inspection_runs r ON r.run_id=rep.run_id
+                WHERE r.vcenter_id=? AND rep.report_type IN ('html_package','docx','pdf') AND rep.report_status='success'
+                ORDER BY COALESCE(rep.generated_at,rep.created_at) DESC LIMIT ?""", (environment_id, limit * 3)).fetchall()
+        items = [self._report_center_item(Path(r["file_path"]), db_item=histories.get(r["run_id"]), report_type=r["report_type"]) for r in rows if r["file_path"] and r["run_id"] in histories]
+        ignored = self._ignored_report_path_keys(db)
+        return [item for item in self._merge_health_report_formats(items) if self._report_center_item_visible(item) and self._report_item_path_key(item) not in ignored][:limit]
 
     def _log_analysis_report_items(self, conn: sqlite3.Connection, limit: int = 80) -> list[ReportCenterItem]:
         try:
@@ -1760,7 +1920,13 @@ class InspectionService:
         customer_info = context.get("customer_info", {}) if isinstance(context, dict) else {}
         run_timing = context.get("run_timing", {}) if isinstance(context, dict) else {}
         health = context.get("health_score", {}) if isinstance(context, dict) else {}
-        risks = self._report_risk_summary(context.get("risk_summary", {}) if isinstance(context, dict) else {}, db_item)
+        caliber = context.get("customer_caliber", {}) if isinstance(context, dict) else {}
+        if db_item is not None:
+            caliber = db_item.customer_caliber
+        if not caliber:
+            from vstacklens.application.caliber_reader import legacy_summary
+            caliber = legacy_summary()
+        risks = caliber.get("counts") or self._report_risk_summary(context.get("risk_summary", {}) if isinstance(context, dict) else {}, db_item)
         assets = self._report_asset_summary(payload)
         title = self._display_metadata(report_info.get("report_title"), "", DEFAULT_REPORT_TITLE)
         customer = self._display_metadata(
@@ -1809,6 +1975,7 @@ class InspectionService:
             status=status,
             report_type=self._report_type_label("docx" if is_docx else "pdf" if is_pdf else (report_type or "html_package")),
             path_hint=str(visible_path if visible_path.exists() else report_dir),
+            customer_caliber=caliber,
         )
 
     def _report_item_key(self, item: ReportCenterItem) -> tuple[str, str]:
@@ -2008,9 +2175,11 @@ class InspectionService:
         pdf_path: Path | None = None,
         pdf_error: str | None = None,
         html_error: str | None = None,
+        delivery_error: str | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> InspectionRunResult:
         with connect(db_path) as conn:
-            row = conn.execute("SELECT score, risk_summary_json, risk_category_summary_json FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone()
+            row = conn.execute("SELECT score, risk_summary_json, risk_category_summary_json, run_status, error_message FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone()
             html_row = conn.execute(
                 """
                 SELECT file_path, report_status, error_message
@@ -2041,6 +2210,12 @@ class InspectionService:
                 """,
                 (run_id,),
             ).fetchone()
+        if row is None:
+            raise RuntimeError("巡检结果未登记，不能确认任务完成。")
+        if row["run_status"] == "cancelled":
+            raise RunnerCancelledError("巡检已取消。")
+        if row["run_status"] not in {"success", "failed"}:
+            raise RuntimeError("巡检仍有未完成步骤。")
         if docx_row:
             if not docx_path and docx_row["report_status"] == "success" and docx_row["file_path"]:
                 docx_path = Path(docx_row["file_path"])
@@ -2053,26 +2228,50 @@ class InspectionService:
                 pdf_error = pdf_row["error_message"] or "PDF 报告未生成。"
         if html_row and not html_error and html_row["report_status"] != "success":
             html_error = html_row["error_message"] or "HTML 报告未生成。"
-        risk_summary = self._risk_summary_from_json((row["risk_category_summary_json"] or row["risk_summary_json"]) if row else "{}")
+        if not html_error and (html_row is None or not (report_dir / "index.html").is_file()):
+            html_error = "HTML 报告未登记或文件不存在。"
+        if not docx_error and (docx_row is None or docx_path is None or not docx_path.is_file()):
+            docx_error = "Word 报告未登记或文件不存在。"
+        if not pdf_error and (pdf_row is None or pdf_path is None or not pdf_path.is_file()):
+            pdf_error = "PDF 报告未登记或文件不存在。"
+        caliber = self.get_customer_caliber(db_path, run_id)
+        risk_summary = caliber["counts"] or self._risk_summary_from_json((row["risk_category_summary_json"] or row["risk_summary_json"]) if row else "{}")
+        delivery_errors = [message for message in (html_error, docx_error, pdf_error, delivery_error) if message]
+        if row["run_status"] == "failed":
+            delivery_errors.append(row["error_message"] or "巡检运行记录为失败，不能确认任务完成。")
+        terminal_error = "；".join(dict.fromkeys(delivery_errors)) if delivery_errors else None
+        terminal_state = InspectionState.FAILED if delivery_errors else InspectionState.COMPLETED
+        terminal_stage = "delivery_failed" if delivery_errors else "success"
         result = InspectionRunResult(
             run_id=run_id,
-            report_path=report_dir / "index.html",
+            report_path=report_dir / ("blocked-customer-report" if html_error else "index.html"),
             report_dir=report_dir,
             zip_path=zip_path,
             score=row["score"] if row else None,
-            docx_path=docx_path,
+            docx_path=docx_path if not docx_error else None,
             docx_error=docx_error,
             risk_summary=risk_summary,
-            pdf_path=pdf_path,
+            pdf_path=pdf_path if not pdf_error else None,
             pdf_error=pdf_error,
             html_error=html_error,
+            delivery_error=delivery_error,
+            customer_caliber=caliber,
+            state=terminal_state,
+            stage=terminal_stage,
+            error=terminal_error,
         )
+        self._raise_if_cancelled(cancel_requested)
+        if delivery_errors:
+            from vstacklens.db.repositories import update_run
+            with connect(db_path) as conn:
+                update_run(conn, run_id, "failed", "delivery_failed", 100, terminal_error[:1000])
         self._progress = InspectionProgress(
-            state=InspectionState.COMPLETED,
+            state=terminal_state,
             run_id=run_id,
-            stage="success",
+            stage=terminal_stage,
             percent=100,
-            message="巡检完成",
+            message="巡检数据已保存，报告交付存在错误" if delivery_errors else "巡检完成",
+            error=terminal_error,
         )
         self._emit_progress(progress_callback)
         return result
@@ -2085,6 +2284,10 @@ class InspectionService:
         cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
         LOGGER.info("vCenter inspection progress stage=%s percent=%s run_id=%s", stage, percent, self._progress.run_id)
+        # The runner has finished its work, but the service still has to read and
+        # validate the saved delivery records before announcing completion.
+        if stage in {"success", "delivery_failed"}:
+            stage, percent = "finalizing", 99
         if stage.startswith("run_id:"):
             self._progress = InspectionProgress(
                 state=InspectionState.RUNNING,
@@ -2175,19 +2378,27 @@ class InspectionService:
                 result[label] = int(row["c"] or 0)
         return result
 
-    def _risk_trend(self, conn: sqlite3.Connection, limit: int = 30) -> list[dict[str, Any]]:
+    def _risk_trend(self, conn: sqlite3.Connection, limit: int = 30, *, run_id: str | None = None) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT run_id, score, risk_summary_json, risk_category_summary_json, COALESCE(finished_at, updated_at, created_at) AS ts
             FROM inspection_runs
+            WHERE vcenter_id = (SELECT vcenter_id FROM inspection_runs WHERE (? IS NULL OR run_id=?) ORDER BY COALESCE(finished_at, updated_at, created_at) DESC LIMIT 1)
+              AND (? IS NULL OR (run_status='success'
+                AND EXISTS (SELECT 1 FROM inventory_objects o WHERE o.run_id=inspection_runs.run_id)
+                AND EXISTS (SELECT 1 FROM rule_results rr WHERE rr.run_id=inspection_runs.run_id AND rr.result_status IN ('passed','failed'))))
             ORDER BY COALESCE(finished_at, updated_at, created_at) DESC
             LIMIT ?
             """,
-            (limit,),
+            (run_id, run_id, run_id, limit),
         ).fetchall()
         trend: list[dict[str, Any]] = []
         for row in reversed(rows):
-            risk = self._risk_summary_from_json(row["risk_category_summary_json"] or row["risk_summary_json"])
+            database = conn.execute("PRAGMA database_list").fetchone()[2]
+            caliber = self.get_customer_caliber(Path(database), row["run_id"])
+            if caliber["state"] != "complete" or caliber["health"]["assessment_limited"]:
+                continue
+            risk = caliber["counts"]
             trend.append(
                 {
                     "run_id": row["run_id"],
@@ -2195,6 +2406,9 @@ class InspectionService:
                     "score": row["score"],
                     "risk_total": actionable_risk_total(risk),
                     "optimization_total": int(risk.get("P4", 0) or 0),
+                    "risk_counts": caliber["counts"],
+                    "affected_total": caliber["affected_total"],
+                    "health_status": caliber["health"]["label"],
                 }
             )
         return trend
@@ -2525,6 +2739,10 @@ class InspectionService:
         return InspectionState.IDLE
 
     def _stage_label(self, stage: str | None) -> str:
+        if stage and stage.startswith("building_vm_objects:"):
+            completed, separator, total = stage.partition(":")[2].partition("/")
+            if separator and completed.isdecimal() and total.isdecimal():
+                return f"正在采集虚拟机 {completed}/{total}"
         labels = {
             "idle": "等待巡检",
             "pending": "等待启动",
@@ -2551,6 +2769,13 @@ class InspectionService:
             "building_findings": "正在生成风险结果",
             "scoring": "正在计算健康评分",
             "reporting": "正在生成 HTML 报告",
+            "reporting_json": "正在保存标准结果",
+            "reporting_word": "正在生成 Word 报告",
+            "reporting_pdf": "正在生成 PDF 报告",
+            "scanning_reports": "正在扫描报告产物",
+            "registering_reports": "正在登记报告与诊断",
+            "finalizing": "正在核对报告并完成收尾",
+            "delivery_failed": "巡检数据已保存，报告交付存在错误",
             "success": "巡检完成",
             "failed": "巡检失败",
             "cancelling": "正在取消巡检",

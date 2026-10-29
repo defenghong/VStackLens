@@ -24,21 +24,21 @@ rules:
       required: false
   condition:
     type: safe_expression
-    fail_when: used_percent >= 80
-    pass_when: used_percent < 80
+    fail_when: used_percent >= 75
+    pass_when: used_percent < 75
   severity_policy:
     type: threshold
     default_level: P3
     rules:
-    - when: used_percent >= 95
-      level: P1
     - when: used_percent >= 90
-      level: P2
+      level: P1
     - when: used_percent >= 80
+      level: P2
+    - when: used_percent >= 75
       level: P3
   evidence_schema:
     current_value_path: used_percent
-    expected_value: < 80
+    expected_value: < 75
     required_fields:
     - run_id
     - vcenter_id

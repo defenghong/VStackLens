@@ -53,11 +53,20 @@ APP_VERSION,
     runtime_log_path,
     runtime_mode,
 )
+from vstacklens.desktop.layout3a import Layout3aMixin
+from vstacklens.desktop.layout3a2 import Layout3a2Mixin
+from vstacklens.desktop.layout3a2b import Layout3a2bMixin, material_date
+from vstacklens.desktop.environment_archive import EnvironmentArchiveMixin
+from vstacklens.desktop.product_inspection import ProductInspectionMixin
+from vstacklens.desktop.batch_inspection import BatchInspectionMixin
+from vstacklens.desktop.scheduled_inspection import ScheduledInspectionMixin
+from vstacklens.desktop.tray_runtime import TrayRuntimeMixin
+from vstacklens.desktop.presentation import local_time, ui_text
 from vstacklens.desktop.modules import ModuleDescriptor, inspection_capabilities, primary_modules
-from vstacklens.desktop.theme import APP_STYLE
+from vstacklens.desktop.theme import COLORS, apply_application_theme, current_stylesheet, TYPOGRAPHY, SIZES
 from vstacklens.desktop.topology import ProductLogo
 from vstacklens.desktop.windowing import app_icon_path, enable_windows_dark_title_bar
-from vstacklens.desktop.widgets import EmptyState, InfoCard, MetricCard, NoWheelComboBox, PageHeader, PathLineEdit, RiskTrendChart, SectionCard, muted_label, risk_badge, status_badge
+from vstacklens.desktop.widgets import ElidingLabel, EmptyState, InfoCard, MetricCard, MetricValueLabel, NoWheelComboBox, PageHeader, PathLineEdit, RiskTrendChart, SectionCard, muted_label, risk_badge, status_badge
 from vstacklens.db.repositories import actionable_risk_total
 
 
@@ -120,20 +129,23 @@ def password_visibility_icon(*, visible: bool) -> QIcon:
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    painter.setPen(QPen(QColor("#9FBCE0"), 1.8))
+    painter.setPen(QPen(QColor(COLORS["subtext"]), 1.8))
     painter.setBrush(Qt.NoBrush)
     painter.drawEllipse(3, 7, 16, 10)
-    painter.setBrush(QColor("#9FBCE0"))
+    painter.setBrush(QColor(COLORS["subtext"]))
     painter.setPen(Qt.NoPen)
     painter.drawEllipse(9, 10, 4, 4)
     if visible:
-        painter.setPen(QPen(QColor("#9FBCE0"), 1.8))
+        painter.setPen(QPen(QColor(COLORS["subtext"]), 1.8))
         painter.drawLine(4, 4, 18, 18)
     painter.end()
     return QIcon(pixmap)
 
 
 def configure_chinese_font(app: QApplication) -> str | None:
+    if hasattr(app, "_vstacklens_font_family"):
+        font = QFont(app._vstacklens_font_family); font.setPixelSize(TYPOGRAPHY["body"]); app.setFont(font)
+        return app._vstacklens_font_family
     font_candidates = [
         Path(r"C:\Windows\Fonts\msyh.ttc"),
         Path(r"C:\Windows\Fonts\simsun.ttc"),
@@ -149,7 +161,12 @@ def configure_chinese_font(app: QApplication) -> str | None:
         families = QFontDatabase.applicationFontFamilies(font_id)
         if families:
             family = families[0]
-            app.setFont(QFont(family, 9))
+            bold_path = font_path.with_name("msyhbd.ttc")
+            if font_path.name.lower() == "msyh.ttc" and bold_path.exists():
+                bold_id = QFontDatabase.addApplicationFont(str(bold_path))
+                if bold_id >= 0: print(f"Loaded Chinese bold font: {bold_path}")
+            font = QFont(family); font.setPixelSize(TYPOGRAPHY["body"]); app.setFont(font)
+            app._vstacklens_font_family = family
             print(f"Loaded Chinese UI font: {family} ({font_path})")
             return family
     print("Warning: no Chinese UI font could be loaded; using Qt default font.")
@@ -158,43 +175,62 @@ def configure_chinese_font(app: QApplication) -> str | None:
 
 class LoginWindow(QDialog):
     def __init__(self, auth_service: AuthService | None = None, parent: QWidget | None = None) -> None:
+        if not QApplication.instance().styleSheet():apply_application_theme(QApplication.instance(),"light")
         super().__init__(parent)
         self.auth_service = auth_service or AuthService()
         self.authenticated = False
         self.logged_in_username = ""
-        self.setWindowTitle("VStackLens Health Assessment Platform")
+        self.setWindowTitle("VStackLens · 虚拟化巡检工作台")
         self.setWindowIcon(QIcon(str(app_icon_path())))
-        self.resize(600, 700)
-        self.setMinimumSize(520, 620)
+        self.resize(480, 560)
+        self.setMinimumSize(360, 500)
         self.setObjectName("loginWindow")
-        self.setStyleSheet(APP_STYLE)
         enable_windows_dark_title_bar(self)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 44, 60, 36)
+        root.setContentsMargins(24, 24, 24, 20)
         root.setSpacing(0)
         root.addStretch(1)
-        form = QWidget()
-        form.setMaximumWidth(430)
+        class LoginForm(QWidget):
+            def sizeHint(self) -> QSize:
+                hint = super().sizeHint()
+                hint.setWidth(340)
+                return hint
+
+        form = LoginForm()
+        form.setObjectName("loginForm")
+        form.setMaximumWidth(340)
         form_layout = QVBoxLayout(form)
         form_layout.setContentsMargins(0, 0, 0, 0)
-        form_layout.setSpacing(12)
+        form_layout.setSpacing(8)
 
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
+        brand.addStretch(1)
         logo = ProductLogo()
-        logo.setFixedSize(88, 72)
+        logo.setFixedSize(78, 64)
         title = QLabel("VStackLens")
         title.setObjectName("loginTitle")
-        title.setAlignment(Qt.AlignCenter)
+        brand.addWidget(logo)
+        brand.addWidget(title)
+        brand.addStretch(1)
+        subtitle = QLabel("虚拟化巡检与报告工作台")
+        subtitle.setObjectName("loginSubtitle")
+        subtitle.setAlignment(Qt.AlignCenter)
+        account_hint = QLabel("本地账号登录")
+        account_hint.setObjectName("loginAccountHint")
+        account_hint.setAlignment(Qt.AlignCenter)
+
         self.username_input = QLineEdit()
         self.username_input.setObjectName("loginInput")
         self.username_input.setPlaceholderText("输入用户名")
-        self.username_input.setMinimumHeight(52)
+        self.username_input.setMinimumHeight(38)
         saved_username = self.auth_service.load_saved_username() or AuthService.DEFAULT_USERNAME
         if saved_username:
             self.username_input.setText(saved_username)
         self.password_input = QLineEdit()
         self.password_input.setObjectName("loginInput")
-        self.password_input.setMinimumHeight(52)
+        self.password_input.setMinimumHeight(38)
         self.password_input.setEchoMode(QLineEdit.Password)
         self.password_input.setPlaceholderText("请输入本地密码")
         self.password_input.returnPressed.connect(self._login)
@@ -207,11 +243,20 @@ class LoginWindow(QDialog):
         self.error_label = QLabel("")
         self.error_label.setObjectName("loginError")
         self.error_label.setWordWrap(True)
+        self.error_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.error_label.hide()
+        # Keep the existing authentication hide/show behavior inside a stable slot.
+        error_slot = QWidget()
+        error_slot.setObjectName("loginErrorSlot")
+        error_slot.setFixedHeight(max(44, self.error_label.fontMetrics().lineSpacing() * 2))
+        error_layout = QVBoxLayout(error_slot)
+        error_layout.setContentsMargins(0, 0, 0, 0)
+        error_layout.setSpacing(0)
+        error_layout.addWidget(self.error_label)
 
         self.login_button = QPushButton("登录")
         self.login_button.setObjectName("loginPrimaryButton")
-        self.login_button.setMinimumHeight(54)
+        self.login_button.setMinimumHeight(38)
         self.login_button.setDefault(True)
         self.login_button.clicked.connect(self._login)
 
@@ -219,26 +264,33 @@ class LoginWindow(QDialog):
         username_label.setObjectName("loginFieldLabel")
         password_label = QLabel("密码")
         password_label.setObjectName("loginFieldLabel")
-        form_layout.addWidget(logo, alignment=Qt.AlignHCenter)
-        form_layout.addSpacing(8)
-        form_layout.addWidget(title)
-        form_layout.addSpacing(40)
-        form_layout.addWidget(username_label)
-        form_layout.addWidget(self.username_input)
-        form_layout.addSpacing(10)
-        form_layout.addWidget(password_label)
-        form_layout.addWidget(self.password_input)
-        form_layout.addSpacing(8)
+        form_layout.addLayout(brand)
+        form_layout.addWidget(subtitle)
+        form_layout.addWidget(account_hint)
+        username_field = QVBoxLayout()
+        username_field.setSpacing(4)
+        username_field.addWidget(username_label)
+        username_field.addWidget(self.username_input)
+        password_field = QVBoxLayout()
+        password_field.setSpacing(4)
+        password_field.addWidget(password_label)
+        password_field.addWidget(self.password_input)
+        form_layout.addLayout(username_field)
+        form_layout.addLayout(password_field)
         form_layout.addWidget(self.remember_username)
-        form_layout.addWidget(self.error_label)
-        form_layout.addSpacing(12)
+        form_layout.addWidget(error_slot)
         form_layout.addWidget(self.login_button)
-        form_layout.addSpacing(36)
-        footer = muted_label(f"版本 {APP_VERSION}")
-        footer.setAlignment(Qt.AlignCenter)
-        form_layout.addWidget(footer)
-        root.addWidget(form, alignment=Qt.AlignHCenter)
+        centered_form = QHBoxLayout()
+        centered_form.setContentsMargins(0, 0, 0, 0)
+        centered_form.addStretch(1)
+        centered_form.addWidget(form)
+        centered_form.addStretch(1)
+        root.addLayout(centered_form)
         root.addStretch(1)
+        footer = muted_label(f"版本 {APP_VERSION}")
+        footer.setObjectName("loginVersion")
+        footer.setAlignment(Qt.AlignCenter)
+        root.addWidget(footer)
         self.setTabOrder(self.username_input, self.password_input)
         self.setTabOrder(self.password_input, self.remember_username)
         self.setTabOrder(self.remember_username, self.login_button)
@@ -249,6 +301,11 @@ class LoginWindow(QDialog):
         self.password_input.setEchoMode(QLineEdit.Password if visible else QLineEdit.Normal)
         self.password_visibility_action.setIcon(password_visibility_icon(visible=not visible))
         self.password_visibility_action.setToolTip("显示密码" if visible else "隐藏密码")
+
+    def _refresh_theme_icons(self) -> None:
+        self.password_visibility_action.setIcon(
+            password_visibility_icon(visible=self.password_input.echoMode() == QLineEdit.Normal)
+        )
 
     def _login(self) -> None:
         username = self.username_input.text()
@@ -270,7 +327,7 @@ class DefaultPasswordWarningDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("建议修改默认密码")
         self.setWindowIcon(QIcon(str(app_icon_path())))
-        self.setStyleSheet(APP_STYLE)
+        if not QApplication.instance().styleSheet():apply_application_theme(QApplication.instance(),"light")
         self.resize(420, 220)
         enable_windows_dark_title_bar(self)
         self.modify_now = False
@@ -328,8 +385,10 @@ class InspectionWorker(QThread):
                 )
             )
         except Exception as exc:  # noqa: BLE001 - surface all service errors to desktop users.
-            LOGGER.exception("Desktop inspection worker failed")
-            self.failed.emit(str(exc))
+            from vstacklens.collection.diagnostics import exception_details
+            from vstacklens.application.connection_probe import redact_sensitive
+            LOGGER.error("Desktop inspection worker failed diagnostic=%s",exception_details(exc,secrets=(self.config.password,)))
+            self.failed.emit(redact_sensitive(exc,self.config.password))
 
 
 class LogAnalysisWorker(QThread):
@@ -429,7 +488,7 @@ class CloudConnectionTestWorker(QThread):
             self.completed.emit(type("CloudTestFailure", (), {"ok": False, "fallback_reason": sanitize_cloud_error(exc, self.config.api_key), "elapsed_ms": 0})())
 
 
-class MainWindow(QMainWindow):
+class MainWindow(ProductInspectionMixin, TrayRuntimeMixin, ScheduledInspectionMixin, BatchInspectionMixin, EnvironmentArchiveMixin, Layout3a2bMixin, Layout3a2Mixin, Layout3aMixin, QMainWindow):
     def __init__(self, service: InspectionService | None = None, auth_service: AuthService | None = None, current_username: str | None = None) -> None:
         super().__init__()
         self.service = service or InspectionService()
@@ -456,34 +515,53 @@ class MainWindow(QMainWindow):
         self._history_comparison: HistoryComparison | None = None
         self._history_combo_updating = False
         self._report_items: list[ReportCenterItem] = []
+        self._environment_id = None
+        self._inspection_environment_id = None
+        self.batch_worker = None
+        self._batch_closing = False
 
-        self.setWindowTitle("VStackLens Health Assessment Platform")
+        self.setWindowTitle("VStackLens · 虚拟化巡检工作台")
         self.setWindowIcon(QIcon(str(app_icon_path())))
-        self.resize(1360, 860)
-        self.setMinimumSize(1280, 800)
-        self.setStyleSheet(APP_STYLE)
+        self.resize(1360, 696)
+        self.setMinimumSize(840, 500)
+        apply_application_theme(QApplication.instance(), self.service.load_config().ui_theme)
         enable_windows_dark_title_bar(self)
 
         self.nav = QListWidget()
+        from vstacklens.desktop.navigation_icons import NavigationDelegate
+        self.nav.setItemDelegate(NavigationDelegate(self.nav))
+        self.nav.viewport().installEventFilter(self)
+        self.nav.setIconSize(QSize(SIZES["navigation_icon"], SIZES["navigation_icon"]))
         self.nav.setObjectName("moduleNav")
-        for module in self.module_descriptors:
-            item = QListWidgetItem(module.module_name)
-            item.setData(Qt.UserRole, module.module_id)
-            self.nav.addItem(item)
+        self.nav.setProperty("navigation", True)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.nav_rows = {}
+        groups = (("主要工作", self.module_descriptors[:3]), ("结果查看", self.module_descriptors[3:7]), ("专项工具", self.module_descriptors[7:9]))
+        for title, modules in groups:
+            heading = QListWidgetItem(ui_text(title)); heading.setFlags(Qt.NoItemFlags); heading.setSizeHint(QSize(180, SIZES["navigation_group"]))
+            group_font = QFont(self.font()); group_font.setPixelSize(TYPOGRAPHY["navigation_group"]); heading.setFont(group_font)
+            self.nav.addItem(heading)
+            for module in modules:
+                item = QListWidgetItem(ui_text(module.module_name)); item.setData(Qt.UserRole, module.module_id); item.setSizeHint(QSize(180, SIZES["navigation_row"]))
+                self.nav_rows[module.module_id] = self.nav.count(); self.nav.addItem(item)
+        self.nav_spacer = QListWidgetItem(); self.nav_spacer.setFlags(Qt.NoItemFlags); self.nav.addItem(self.nav_spacer)
+        for module in self.module_descriptors[9:]:
+            item = QListWidgetItem(ui_text(module.module_name)); item.setData(Qt.UserRole, module.module_id); item.setSizeHint(QSize(180, SIZES["navigation_row"]))
+            self.nav_rows[module.module_id] = self.nav.count(); self.nav.addItem(item)
         self.nav.currentRowChanged.connect(self._switch_page)
+        self.nav.currentRowChanged.connect(self._refresh_theme_icons)
+        self._refresh_theme_icons()
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._dashboard_page())
-        self.pages.addWidget(self._vcenter_management_page())
-        self.pages.addWidget(self._inspection_center_page())
-        self.pages.addWidget(self._log_analysis_page())
-        self.pages.addWidget(self._upgrade_compat_page())
-        self.pages.addWidget(self._risk_center_page())
-        self.pages.addWidget(self._asset_center_page())
-        self.pages.addWidget(self._history_compare_page())
-        self.pages.addWidget(self._report_center_page())
-        self.pages.addWidget(self._settings_page())
-        self.pages.addWidget(self._license_page())
+        factories = {
+            "dashboard": self._dashboard_page, "vcenter_management": self._vcenter_management_page,
+            "inspection_center": self._inspection_center_page, "risk_center": self._risk_center_page,
+            "asset_center": self._asset_center_page, "history_compare": self._history_compare_page,
+            "report_center": self._report_center_page, "log_analysis": self._log_analysis_page,
+            "upgrade_compat": self._upgrade_compat_page, "settings": self._settings_page, "license": self._license_page,
+        }
+        for module in self.module_descriptors: self.pages.addWidget(factories[module.module_id]())
+        self._arrange_page_actions()
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -494,193 +572,68 @@ class MainWindow(QMainWindow):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
         body.addWidget(self._sidebar())
-        body.addWidget(self.pages, 1)
+        workspace = QWidget(); workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0); workspace_layout.setSpacing(0)
+        self.context_bar = QFrame(); self.context_bar.setObjectName("contextBar"); self.context_bar.setFixedHeight(SIZES["context_height"])
+        context_layout = QHBoxLayout(self.context_bar); context_layout.setContentsMargins(SIZES["page_margin"], 0, SIZES["page_margin"], 0)
+        self.current_object_label = ElidingLabel("尚无巡检记录"); self.current_object_label.setObjectName("contextObject"); self.current_object_label.setWordWrap(False); context_layout.addWidget(self.current_object_label, 1)
+        self.clear_environment_button = QPushButton("取消环境限定"); self.clear_environment_button.clicked.connect(self._clear_environment_scope); self.clear_environment_button.hide(); context_layout.addWidget(self.clear_environment_button)
+        workspace_layout.addWidget(self.context_bar); workspace_layout.addWidget(self.pages, 1)
+        body.addWidget(workspace, 1)
         root_layout.addLayout(body, 1)
         self.setCentralWidget(root)
 
         self._load_saved_config()
         self.go_to_module("dashboard")
         self._refresh_all_data()
+        self._start_plan_runtime()
+        self._initialize_tray()
+        self.close_choice_combo.setCurrentIndex(self.close_choice_combo.findData(self._read_close_choice()))
 
     def _top_bar(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("topBar")
-        frame.setFixedHeight(60)
+        frame.setFixedHeight(SIZES["top_bar"])
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(20, 0, 24, 0)
         title = QLabel("VStackLens")
         title.setObjectName("brandTitle")
-        subtitle = QLabel("Health Assessment Platform")
+        subtitle = QLabel("虚拟化巡检工作台")
         subtitle.setObjectName("topSubtitle")
         layout.addWidget(title)
+        divider=QFrame(); divider.setObjectName("conclusionDivider"); divider.setFixedSize(1,SIZES["title_strip_height"]); layout.addWidget(divider)
         layout.addWidget(subtitle)
-        layout.addStretch(1)
         layout.addWidget(status_badge("available", "本地运行"))
+        layout.addStretch(1)
         return frame
 
     def _sidebar(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("sidebar")
-        frame.setFixedWidth(218)
+        frame.setFixedWidth(SIZES["sidebar"])
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(14, 16, 14, 16)
+        layout.setContentsMargins(8, 10, 8, 10)
         layout.setSpacing(10)
-        layout.addWidget(muted_label("导航"))
         layout.addWidget(self.nav, 1)
-        layout.addWidget(muted_label("本地运行"), alignment=Qt.AlignCenter)
         return frame
 
-    def _scroll_page(self, content: QWidget) -> QScrollArea:
+    def _scroll_page(self, content: QWidget, *, horizontal: bool = False) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if horizontal else Qt.ScrollBarAlwaysOff)
+        if horizontal:
+            content.setMinimumWidth(content.minimumSizeHint().width())
         scroll.setWidget(content)
         return scroll
 
     def _dashboard_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(12)
-        layout.addWidget(PageHeader("仪表盘"))
-
-        top = QHBoxLayout()
-        top.setSpacing(10)
-        score_card = SectionCard("环境状态")
-        score_card.setMinimumHeight(142)
-        self.dashboard_health_badge = status_badge("unknown", "等待首次评估")
-        self.dashboard_health_value = QLabel("等待首次评估")
-        self.dashboard_health_value.setObjectName("dashboardHealthValue")
-        self.dashboard_scope_label = muted_label("等待选择评估范围")
-        self.dashboard_health_badge.hide()
-        score_card.layout.addWidget(self.dashboard_health_value)
-        score_card.layout.addWidget(self.dashboard_scope_label)
-        top.addWidget(score_card, 2, alignment=Qt.AlignTop)
-        self.risk_metric_labels: dict[str, QLabel] = {}
-        self.risk_metric_cards: list[SectionCard] = []
-        risk_overview = QWidget()
-        risk_grid = QHBoxLayout(risk_overview)
-        risk_grid.setContentsMargins(0, 0, 0, 0)
-        risk_grid.setSpacing(10)
-        self.risk_waiting_card = EmptyState("风险统计", "完成评估后展示 P1 / P2 / P3 风险与优化建议分布。", button_text="去巡检中心", on_click=lambda: self.go_to_module("inspection_center"))
-        risk_grid.addWidget(self.risk_waiting_card)
-        for index, level in enumerate(("P1", "P2", "P3", "P4")):
-            card = SectionCard("优化建议" if level == "P4" else f"{level} 风险")
-            card.setMinimumHeight(112)
-            value = QLabel("0")
-            value.setObjectName("metricValue")
-            self.risk_metric_labels[level] = value
-            card.layout.addWidget(value)
-            card.setToolTip(f"点击左侧风险中心可查看全部 {level} 风险。")
-            risk_grid.addWidget(card, 1)
-            self.risk_metric_cards.append(card)
-        top.addWidget(risk_overview, 5)
-        layout.addLayout(top)
-
-        self.asset_metric_row = QHBoxLayout()
-        self.asset_metric_row.setSpacing(10)
-        self.asset_metric_cards: dict[str, QLabel] = {}
-        self.asset_metric_widgets: list[SectionCard] = []
-        self.asset_waiting_card = EmptyState("资产概览", "完成评估后展示 vCenter / Cluster / Host / Datastore / VM。", button_text="去巡检中心", on_click=lambda: self.go_to_module("inspection_center"))
-        self.asset_metric_row.addWidget(self.asset_waiting_card)
-        for label, subtitle in (
-            ("vCenter", "管理入口"),
-            ("Cluster", "集群覆盖"),
-            ("ESXi Host", "主机资源"),
-            ("Datastore", "存储域"),
-            ("VM", "业务负载"),
-        ):
-            card = SectionCard(label)
-            card.setMinimumHeight(94)
-            value = QLabel("0")
-            value.setObjectName("smallMetricValue")
-            self.asset_metric_cards[label] = value
-            card.layout.addWidget(value)
-            card.layout.addWidget(muted_label(subtitle))
-            self.asset_metric_row.addWidget(card, 1)
-            self.asset_metric_widgets.append(card)
-        layout.addLayout(self.asset_metric_row)
-
-        bottom = QGridLayout()
-        bottom.setSpacing(12)
-        self.trend_card = SectionCard("风险趋势")
-        self.trend_text = muted_label("暂无历史数据。")
-        self.trend_chart = RiskTrendChart()
-        self.trend_card.layout.addWidget(self.trend_chart)
-        self.trend_card.layout.addWidget(self.trend_text)
-        self.certificate_summary_card = SectionCard("证书与授权")
-        self.dashboard_certificate_summary = muted_label("完成巡检后展示证书和授权核验状态。")
-        self.dashboard_certificate_list = QListWidget()
-        self.dashboard_certificate_list.setObjectName("moduleNav")
-        self.dashboard_certificate_list.setMaximumHeight(166)
-        self.dashboard_certificate_list.setSpacing(4)
-        self.dashboard_certificate_list.setWordWrap(True)
-        self.dashboard_certificate_detail = QTextEdit()
-        self.dashboard_certificate_detail.setReadOnly(True)
-        self.dashboard_certificate_detail.setMaximumHeight(150)
-        self.dashboard_certificate_detail.hide()
-        self.dashboard_certificate_toggle = QPushButton("查看核验明细")
-        self.dashboard_certificate_toggle.setObjectName("quietButton")
-        self.dashboard_certificate_toggle.clicked.connect(self._toggle_certificate_detail)
-        self.dashboard_certificate_toggle.setEnabled(False)
-        self.certificate_summary_card.layout.addWidget(self.dashboard_certificate_summary)
-        self.certificate_summary_card.layout.addWidget(self.dashboard_certificate_list)
-        self.certificate_summary_card.layout.addWidget(self.dashboard_certificate_toggle, alignment=Qt.AlignLeft)
-        self.certificate_summary_card.layout.addWidget(self.dashboard_certificate_detail)
-        self.recent_report_card = SectionCard("最近报告")
-        self.dashboard_reports_empty = EmptyState("暂无评估数据", "完成首次健康评估后，将展示健康状态、风险、资产和报告。", button_text="去巡检中心", on_click=lambda: self.go_to_module("inspection_center"))
-        self.dashboard_reports_table = self._new_history_table(6, compact=True)
-        self.recent_report_card.layout.addWidget(self.dashboard_reports_empty)
-        self.recent_report_card.layout.addWidget(self.dashboard_reports_table)
-        bottom.addWidget(self.trend_card, 0, 0)
-        bottom.addWidget(self.certificate_summary_card, 0, 1)
-        bottom.addWidget(self.recent_report_card, 1, 0, 1, 2)
-        layout.addLayout(bottom)
-        layout.addStretch(1)
-        return self._scroll_page(page)
+        return Layout3aMixin._dashboard_page(self)
 
     def _vcenter_management_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
-        layout.addWidget(PageHeader("vCenter 管理", "基于已完成巡检记录查看本机保存的 vCenter 对象和最近健康状态。"))
-        self.vcenter_stack = QStackedWidget()
-        self.vcenter_empty = self._centered_empty_panel()
-        vcenter_data = QWidget()
-        vcenter_data_layout = QVBoxLayout(vcenter_data)
-        vcenter_data_layout.setContentsMargins(0, 0, 0, 0)
-        self.vcenter_cards = QGridLayout()
-        self.vcenter_cards.setSpacing(14)
-        vcenter_data_layout.addLayout(self.vcenter_cards)
-        vcenter_data_layout.addStretch(1)
-        self.vcenter_stack.addWidget(self.vcenter_empty)
-        self.vcenter_stack.addWidget(vcenter_data)
-        layout.addWidget(self.vcenter_stack, 1)
-        layout.addStretch(1)
-        return self._scroll_page(page)
+        return self._environment_archive_page()
 
     def _inspection_center_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
-        header_row = QHBoxLayout()
-        header_row.addWidget(PageHeader("巡检中心", "发起虚拟化健康评估，实时跟踪阶段进度并生成 HTML 报告。"), 1)
-        self.production_impact_info = QLabel("i")
-        self.production_impact_info.setObjectName("productionImpactInfo")
-        self.production_impact_info.setAlignment(Qt.AlignCenter)
-        self.production_impact_info.setToolTip(PRODUCTION_IMPACT_TOOLTIP)
-        self.production_impact_info.setFixedSize(22, 22)
-        header_row.addWidget(self.production_impact_info, alignment=Qt.AlignTop)
-        layout.addLayout(header_row)
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._inspection_tree_panel())
-        splitter.addWidget(self._inspection_config_panel())
-        splitter.addWidget(self._inspection_log_panel())
-        splitter.setSizes([260, 560, 360])
-        layout.addWidget(splitter, 1)
-        return page
+        return Layout3aMixin._inspection_center_page(self)
 
     def _inspection_tree_panel(self) -> QWidget:
         card = SectionCard("客户 / vCenter")
@@ -693,94 +646,19 @@ class MainWindow(QMainWindow):
         return card
 
     def _inspection_config_panel(self) -> QWidget:
-        card = SectionCard("巡检任务配置")
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
-        form.setVerticalSpacing(8)
-        form.setHorizontalSpacing(12)
-        self.vcenter_input = QLineEdit()
-        self.vcenter_input.setPlaceholderText("请输入 vCenter IP 或 FQDN")
-        self.username_input = QLineEdit()
-        self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.Password)
-        self.customer_input = QLineEdit()
-        self.customer_input.setPlaceholderText(DEFAULT_CUSTOMER_NAME)
-        self.report_title_input = QLineEdit()
-        self.report_title_input.setPlaceholderText(DEFAULT_REPORT_TITLE)
-        self.site_input = QLineEdit()
-        self.report_dir_input = PathLineEdit()
-        browse_report = QPushButton("选择目录")
-        browse_report.clicked.connect(self._choose_report_dir)
-        report_dir_row = QWidget()
-        report_dir_layout = QHBoxLayout(report_dir_row)
-        report_dir_layout.setContentsMargins(0, 0, 0, 0)
-        report_dir_layout.addWidget(self.report_dir_input, 1)
-        report_dir_layout.addWidget(browse_report)
-        form.addRow("vCenter 地址", self.vcenter_input)
-        form.addRow("用户名", self.username_input)
-        form.addRow("密码", self.password_input)
-        form.addRow("客户名称", self.customer_input)
-        form.addRow("报告名称", self.report_title_input)
-        form.addRow("报告输出目录", report_dir_row)
-        card.layout.addLayout(form)
-        row = QHBoxLayout()
-        self.start_button = QPushButton("立即健康评估")
-        self.start_button.setObjectName("primaryButton")
-        self.start_button.clicked.connect(self._start_inspection)
-        self.cancel_inspection_button = QPushButton("取消巡检")
-        self.cancel_inspection_button.setEnabled(False)
-        self.cancel_inspection_button.hide()
-        self.cancel_inspection_button.clicked.connect(self._cancel_inspection)
-        row.addWidget(self.start_button)
-        row.addWidget(self.cancel_inspection_button)
-        row.addStretch(1)
-        card.layout.addLayout(row)
-        roadmap = muted_label("后续能力路线图：批量巡检、计划巡检将在后续版本开放，当前核心操作区仅提供单 vCenter 健康评估。")
-        roadmap.setWordWrap(True)
-        card.layout.addWidget(roadmap)
-        card.layout.addStretch(1)
-        return card
+        return Layout3aMixin._inspection_config_panel(self)
 
     def _inspection_log_panel(self) -> QWidget:
-        card = SectionCard("实时日志")
-        self.stage_label = QLabel("等待健康评估")
-        self.stage_label.setObjectName("sectionTitle")
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.status_label = muted_label("填写 vCenter 信息后即可启动。")
-        self.result_summary = QTextEdit()
-        self.result_summary.setReadOnly(True)
-        self.result_summary.setMinimumHeight(180)
-        self.result_summary.setPlaceholderText("等待开始评估")
-        self.open_report_button = QPushButton("打开 HTML 报告")
-        self.open_report_button.setEnabled(False)
-        self.open_report_button.clicked.connect(self._open_current_report)
-        self.open_word_button = QPushButton("打开 Word 报告")
-        self.open_word_button.setEnabled(False)
-        self.open_word_button.clicked.connect(self._open_current_word_report)
-        self.open_pdf_button = QPushButton("打开 PDF 报告")
-        self.open_pdf_button.setEnabled(False)
-        self.open_pdf_button.clicked.connect(self._open_current_pdf_report)
-        self.open_dir_button = QPushButton("打开报告目录")
-        self.open_dir_button.setEnabled(False)
-        self.open_dir_button.clicked.connect(self._open_current_report_dir)
-        row = QHBoxLayout()
-        row.addWidget(self.open_report_button)
-        row.addWidget(self.open_word_button)
-        row.addWidget(self.open_pdf_button)
-        row.addWidget(self.open_dir_button)
-        card.layout.addWidget(self.stage_label)
-        card.layout.addWidget(self.progress_bar)
-        card.layout.addWidget(self.status_label)
-        card.layout.addWidget(self.result_summary, 1)
-        card.layout.addLayout(row)
-        return card
+        return Layout3aMixin._inspection_log_panel(self)
 
     def _log_analysis_page(self) -> QWidget:
+        return self._batch2_log_page()
+
+    def _legacy_log_analysis_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SIZES["page_margin"], 22, SIZES["page_margin"], SIZES["card_padding"])
+        layout.setSpacing(SIZES["card_gap"])
         layout.addWidget(PageHeader("日志分析", "导入 VMware support bundle 日志包并填写问题描述，生成独立 HTML / Word 日志分析报告。"))
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._log_analysis_config_panel())
@@ -897,10 +775,13 @@ class MainWindow(QMainWindow):
         return card
 
     def _upgrade_compat_page(self) -> QWidget:
+        return self._batch2_upgrade_page()
+
+    def _legacy_upgrade_compat_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SIZES["page_margin"], 22, SIZES["page_margin"], SIZES["card_padding"])
+        layout.setSpacing(SIZES["card_gap"])
         layout.addWidget(PageHeader("升级兼容性", "按目标 ESXi 版本检查整机、基础设备和 vSAN 专项兼容性，结果独立于健康巡检。"))
         status_row = QWidget()
         status_layout = QHBoxLayout(status_row)
@@ -1112,241 +993,22 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _risk_center_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(14)
-        layout.addWidget(PageHeader("风险中心", "基于当前巡检结果聚合风险条目，支持等级、对象类型和关键字筛选。"))
-        filters = QHBoxLayout()
-        self.risk_level_filter = NoWheelComboBox()
-        self.risk_level_filter.addItems(["全部等级", "P1", "P2", "P3"])
-        self.risk_type_filter = NoWheelComboBox()
-        self.risk_type_filter.addItems(["全部对象", "vCenter", "ClusterComputeResource", "HostSystem", "Datastore", "VirtualMachine"])
-        self.risk_keyword_input = QLineEdit()
-        self.risk_keyword_input.setPlaceholderText("关键字")
-        for widget in (self.risk_level_filter, self.risk_type_filter, self.risk_keyword_input):
-            if isinstance(widget, QLineEdit):
-                widget.textChanged.connect(self._populate_risk_table)
-            else:
-                widget.currentIndexChanged.connect(self._populate_risk_table)
-            filters.addWidget(widget)
-        filters.addStretch(1)
-        layout.addLayout(filters)
-        self.risk_empty = self._centered_empty_panel()
-        splitter = QSplitter(Qt.Horizontal)
-        self.risk_list = QListWidget()
-        self.risk_list.setObjectName("moduleNav")
-        self.risk_list.setSpacing(8)
-        self.risk_list.setMinimumWidth(520)
-        self.risk_list.currentRowChanged.connect(self._risk_selection_changed)
-        self.risk_detail_card = SectionCard("风险详情")
-        self.risk_detail = QTextEdit()
-        self.risk_detail.setReadOnly(True)
-        self.risk_detail_card.layout.addWidget(self.risk_detail, 1)
-        splitter.addWidget(self.risk_list)
-        splitter.addWidget(self.risk_detail_card)
-        splitter.setSizes([560, 420])
-        self.risk_splitter = splitter
-        layout.addWidget(self.risk_empty, 1)
-        layout.addWidget(splitter, 1)
-        return page
+        return Layout3aMixin._risk_center_page(self)
 
     def _asset_center_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(14)
-        layout.addWidget(PageHeader("资产中心", "基于最新巡检资产快照展示 vCenter、Cluster、ESXi、Datastore 和 VM。"))
-        filters = QHBoxLayout()
-        self.asset_type_filter = NoWheelComboBox()
-        self.asset_type_filter.addItems(["全部对象", "vCenter", "Cluster", "ESXi", "Datastore", "VM"])
-        self.asset_type_filter.hide()
-        self.asset_search_input = QLineEdit()
-        self.asset_search_input.setPlaceholderText("搜索对象名称或位置")
-        self.asset_sort_filter = NoWheelComboBox()
-        self.asset_sort_filter.addItems(["按名称", "按对象类型", "按位置"])
-        self.asset_type_filter.currentIndexChanged.connect(self._populate_asset_table)
-        self.asset_search_input.textChanged.connect(self._populate_asset_table)
-        self.asset_sort_filter.currentIndexChanged.connect(self._populate_asset_table)
-        self.asset_category_bar = QHBoxLayout()
-        self.asset_category_bar.setSpacing(7)
-        self.asset_category_buttons: dict[str, QPushButton] = {}
-        filters.addLayout(self.asset_category_bar, 1)
-        filters.addWidget(self.asset_search_input)
-        filters.addWidget(self.asset_sort_filter)
-        layout.addLayout(filters)
-        self.asset_empty = self._centered_empty_panel()
-        self.asset_table = QTableWidget(0, 4)
-        self.asset_table.setHorizontalHeaderLabels(["对象类型", "对象名称", "位置", "关键属性"])
-        self._prepare_table(self.asset_table)
-        self.asset_table.currentCellChanged.connect(self._asset_selection_changed)
-        self.asset_detail = QTextEdit()
-        self.asset_detail.setReadOnly(True)
-        self.asset_detail.setMinimumWidth(320)
-        self.asset_splitter = QSplitter(Qt.Horizontal)
-        self.asset_splitter.addWidget(self.asset_table)
-        self.asset_splitter.addWidget(self.asset_detail)
-        self.asset_splitter.setSizes([860, 360])
-        layout.addWidget(self.asset_empty, 1)
-        layout.addWidget(self.asset_splitter, 1)
-        return page
+        return Layout3a2Mixin._asset_center_page(self)
 
     def _history_compare_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(10)
-        layout.addWidget(PageHeader("历史对比", "对比两次可比评估之间的风险和资产变化。"))
-
-        selector = SectionCard()
-        selector.setFixedHeight(82)
-        selector_row = QHBoxLayout()
-        selector_row.setSpacing(12)
-        self.baseline_run_combo = NoWheelComboBox()
-        self.comparison_run_combo = NoWheelComboBox()
-        self.baseline_run_combo.setMinimumHeight(36)
-        self.comparison_run_combo.setMinimumHeight(36)
-        self.baseline_run_combo.currentIndexChanged.connect(self._history_combo_changed)
-        self.comparison_run_combo.currentIndexChanged.connect(self._history_combo_changed)
-        selector_row.addWidget(QLabel("基准评估"))
-        selector_row.addWidget(self.baseline_run_combo, 1)
-        selector_row.addWidget(QLabel("对比评估"))
-        selector_row.addWidget(self.comparison_run_combo, 1)
-        selector.layout.addLayout(selector_row)
-        self.history_summary_label = muted_label("完成两次以上评估后，将展示风险变化和资产变化。")
-        selector.layout.addWidget(self.history_summary_label)
-        layout.addWidget(selector)
-
-        self.history_empty = SectionCard("历史对比状态")
-        self.history_empty_text = muted_label("当前只有 1 次评估，完成第二次评估后可生成历史对比。")
-        self.history_empty.layout.addWidget(self.history_empty_text)
-        layout.addWidget(self.history_empty)
-
-        self.history_content = QWidget()
-        content_layout = QVBoxLayout(self.history_content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(14)
-        self.history_metric_grid = QGridLayout()
-        self.history_metric_grid.setSpacing(8)
-        self.history_metric_labels: dict[str, QLabel] = {}
-        self.history_metric_subtitles: dict[str, QLabel] = {}
-        for index, key in enumerate(("P1", "P2", "P3", "host", "vm", "datastore")):
-            card = SectionCard({"host": "ESXi", "vm": "VM", "datastore": "Datastore"}.get(key, f"{key} 风险"))
-            card.setFixedHeight(118)
-            value = QLabel("--")
-            value.setObjectName("metricValue")
-            subtitle = muted_label("无变化")
-            self.history_metric_labels[key] = value
-            self.history_metric_subtitles[key] = subtitle
-            card.layout.addWidget(value)
-            card.layout.addWidget(subtitle)
-            self.history_metric_grid.addWidget(card, 0, index)
-        content_layout.addLayout(self.history_metric_grid)
-
-        self.history_tabs = QTabWidget()
-        risk_card = SectionCard("风险变化")
-        risk_filter_row = QHBoxLayout()
-        self.history_risk_filter = NoWheelComboBox()
-        self.history_risk_filter.addItems(["全部", "新增", "本次未再检出", "持续"])
-        self.history_risk_filter.currentIndexChanged.connect(self._history_risk_filter_changed)
-        risk_filter_row.addWidget(QLabel("筛选"))
-        risk_filter_row.addWidget(self.history_risk_filter)
-        risk_filter_row.addStretch(1)
-        risk_card.layout.addLayout(risk_filter_row)
-        self.history_risk_list = QListWidget()
-        self.history_risk_list.setObjectName("moduleNav")
-        self.history_risk_list.setSpacing(1)
-        risk_card.layout.addWidget(self.history_risk_list)
-        self.history_risk_page_label = muted_label("")
-        self.history_risk_prev = QPushButton("上一页")
-        self.history_risk_next = QPushButton("下一页")
-        self.history_risk_prev.clicked.connect(lambda: self._change_history_page("risk", -1))
-        self.history_risk_next.clicked.connect(lambda: self._change_history_page("risk", 1))
-        risk_pager = QHBoxLayout()
-        risk_pager.addWidget(self.history_risk_page_label, 1)
-        risk_pager.addWidget(self.history_risk_prev)
-        risk_pager.addWidget(self.history_risk_next)
-        risk_card.layout.addLayout(risk_pager)
-
-        asset_card = SectionCard("资产变化")
-        self.history_asset_list = QListWidget()
-        self.history_asset_list.setObjectName("moduleNav")
-        self.history_asset_list.setSpacing(1)
-        asset_card.layout.addWidget(self.history_asset_list)
-        self.history_asset_page_label = muted_label("")
-        self.history_asset_prev = QPushButton("上一页")
-        self.history_asset_next = QPushButton("下一页")
-        self.history_asset_prev.clicked.connect(lambda: self._change_history_page("asset", -1))
-        self.history_asset_next.clicked.connect(lambda: self._change_history_page("asset", 1))
-        asset_pager = QHBoxLayout()
-        asset_pager.addWidget(self.history_asset_page_label, 1)
-        asset_pager.addWidget(self.history_asset_prev)
-        asset_pager.addWidget(self.history_asset_next)
-        asset_card.layout.addLayout(asset_pager)
-        self.history_tabs.addTab(risk_card, "风险变化")
-        self.history_tabs.addTab(asset_card, "资产变化")
-        self.history_tabs.setMinimumHeight(460)
-        content_layout.addWidget(self.history_tabs, 1)
-        layout.addWidget(self.history_content, 1)
-        return self._scroll_page(page)
+        return Layout3a2Mixin._history_compare_page(self)
 
     def _report_center_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(14)
-        layout.addWidget(PageHeader("报告中心", "查看本工具生成的巡检、日志分析和升级兼容性报告。"))
-        splitter = QSplitter(Qt.Horizontal)
-        self.report_center_table = self._new_history_table(50, compact=True)
-        self.report_center_table.hide()
-        self.report_list = QListWidget()
-        self.report_list.setObjectName("moduleNav")
-        self.report_list.setSpacing(8)
-        self.report_list.currentRowChanged.connect(self._report_selection_changed)
-        self.report_center_empty = self._centered_empty_panel()
-        self.report_detail = QTextEdit()
-        self.report_detail.setReadOnly(True)
-        splitter.addWidget(self.report_list)
-        right = SectionCard("报告摘要 / 预览")
-        right.layout.addWidget(self.report_detail)
-        open_row = QHBoxLayout()
-        self.open_selected_report_button = QPushButton("打开报告")
-        self.open_selected_report_button.clicked.connect(self._open_selected_history_report)
-        self.open_selected_dir_button = QPushButton("打开报告目录")
-        self.open_selected_dir_button.clicked.connect(self._open_selected_history_dir)
-        self.report_copy_path_button = QPushButton("复制报告路径")
-        self.report_copy_path_button.clicked.connect(self._copy_selected_report_path)
-        self.report_word_button = QPushButton("打开 Word 报告")
-        self.report_word_button.clicked.connect(self._open_selected_word_report)
-        self.report_pdf_button = QPushButton("打开 PDF 报告")
-        self.report_pdf_button.clicked.connect(self._open_selected_pdf_report)
-        self.delete_report_button = QPushButton("从列表移除")
-        self.delete_report_button.clicked.connect(self._remove_selected_report)
-        self.delete_report_button.setToolTip("仅从报告中心隐藏选中项，不删除报告文件、巡检记录或资产快照。")
-        for button in (self.report_word_button, self.report_pdf_button, self.delete_report_button):
-            button.setEnabled(False)
-        open_row.addWidget(self.open_selected_report_button)
-        open_row.addWidget(self.open_selected_dir_button)
-        open_row.addWidget(self.report_copy_path_button)
-        open_row.addWidget(self.report_word_button)
-        open_row.addWidget(self.report_pdf_button)
-        open_row.addWidget(self.delete_report_button)
-        right.layout.addLayout(open_row)
-        roadmap = muted_label("“从列表移除”不会删除文件；仅已识别为本工具产物的报告会出现在此处。")
-        roadmap.setWordWrap(True)
-        right.layout.addWidget(roadmap)
-        splitter.addWidget(right)
-        splitter.setSizes([720, 360])
-        self.report_splitter = splitter
-        layout.addWidget(self.report_center_empty, 1)
-        layout.addWidget(splitter, 1)
-        return page
+        return Layout3a2Mixin._report_center_page(self)
 
     def _planned_page(self, title: str, message: str) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SIZES["page_margin"], 22, SIZES["page_margin"], SIZES["card_padding"])
+        layout.setSpacing(SIZES["card_gap"])
         layout.addWidget(PageHeader(title, "后续版本能力预留。"))
         card = SectionCard("能力预留")
         card.layout.addWidget(status_badge("planned", "后续版本"))
@@ -1362,8 +1024,8 @@ class MainWindow(QMainWindow):
     def _baseline_center_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SIZES["page_margin"], 22, SIZES["page_margin"], SIZES["card_padding"])
+        layout.setSpacing(SIZES["card_gap"])
         layout.addWidget(PageHeader("健康基线", "查看本地 vSphere 健康评估基线状态。"))
         card = SectionCard("当前评估基线")
         self.rulepack_status_label = QLabel("可用")
@@ -1403,10 +1065,13 @@ class MainWindow(QMainWindow):
         return self._scroll_page(page)
 
     def _settings_page(self) -> QWidget:
+        return self._batch2_settings_page()
+
+    def _legacy_settings_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SIZES["page_margin"], 22, SIZES["page_margin"], SIZES["card_padding"])
+        layout.setSpacing(SIZES["card_gap"])
         layout.addWidget(PageHeader("系统设置", "保存本地数据库、报告目录和日志分析模型配置档案。"))
         card = SectionCard("本机配置")
         form = QFormLayout()
@@ -1414,6 +1079,12 @@ class MainWindow(QMainWindow):
         self.db_path_input = PathLineEdit()
         self.default_report_dir_input = PathLineEdit()
         self.rulepack_path_input = PathLineEdit()
+        self.ui_theme_combo = NoWheelComboBox()
+        self.ui_theme_combo.setFixedWidth(200)
+        self.ui_theme_combo.addItem("深色", "dark")
+        self.ui_theme_combo.addItem("浅色", "light")
+        self.ui_theme_combo.currentIndexChanged.connect(self._ui_theme_changed)
+        form.addRow("界面主题", self.ui_theme_combo)
         form.addRow("数据库路径", self._path_row(self.db_path_input, self._choose_db_path, "选择数据库"))
         form.addRow("报告输出目录", self._path_row(self.default_report_dir_input, self._choose_default_report_dir, "选择目录"))
         card.layout.addLayout(form)
@@ -1569,10 +1240,13 @@ class MainWindow(QMainWindow):
         return self._scroll_page(page)
 
     def _license_page(self) -> QWidget:
+        return self._batch2_about_page()
+
+    def _legacy_license_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 22, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(SIZES["page_margin"], 22, SIZES["page_margin"], SIZES["card_padding"])
+        layout.setSpacing(SIZES["card_gap"])
         layout.addWidget(PageHeader("关于软件", "查看软件版本、本地运行状态和数据目录信息。"))
         card = SectionCard("软件信息")
         form = QFormLayout()
@@ -1627,7 +1301,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _new_history_table(self, limit: int, compact: bool = False) -> QTableWidget:
-        columns = ["时间", "客户", "vCenter", "状态", "评分", "风险"] if compact else ["时间", "客户", "vCenter", "状态", "评分", "风险", "报告路径"]
+        columns = ["时间", "客户", "vCenter", "状态", "健康结论", "风险"] if compact else ["时间", "客户", "vCenter", "状态", "健康结论", "风险", "报告路径"]
         table = QTableWidget(0, len(columns))
         table.setProperty("historyLimit", limit)
         table.setHorizontalHeaderLabels(columns)
@@ -1637,8 +1311,18 @@ class MainWindow(QMainWindow):
         return table
 
     def _prepare_table(self, table: QTableWidget) -> None:
+        from vstacklens.desktop.widgets import RowSeparatorDelegate
+        table.setProperty("cardTable", True)
+        table.setShowGrid(False)
+        table.setItemDelegate(RowSeparatorDelegate(table))
+        table.horizontalHeader().setFixedHeight(SIZES["table_header"])
+        table.verticalHeader().setMinimumSectionSize(SIZES["table_row"])
+        table.verticalHeader().setDefaultSectionSize(SIZES["table_row"])
+        for column in range(table.columnCount()):
+            if table.horizontalHeaderItem(column): table.horizontalHeaderItem(column).setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setTextElideMode(Qt.ElideNone)
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
 
@@ -1646,14 +1330,60 @@ class MainWindow(QMainWindow):
         return self.module_descriptors[self.module_index[module_id]]
 
     def _switch_page(self, index: int) -> None:
-        self.pages.setCurrentIndex(index)
-        page = self.pages.currentWidget()
-        if isinstance(page, QScrollArea):
-            page.verticalScrollBar().setValue(0)
-        self._refresh_all_data()
+        item = self.nav.item(index)
+        if item is None or not item.data(Qt.UserRole): return
+        module = item.data(Qt.UserRole); self._active_module = module
+        if module == "dashboard":
+            self._environment_id = None  # Homepage remains the overview, not a second archive.
+            self._product_scope_target_id = None
+        elif module == "inspection_center":
+            self._environment_id = None if self._has_product_scope() else self._inspection_environment_id
+        self.pages.setCurrentIndex(self.module_index[module])
+        self._refresh_all_data(); self._resize_standard_columns()
 
     def go_to_module(self, module_id: str) -> None:
-        self.nav.setCurrentRow(self.module_index[module_id])
+        self.nav.setCurrentRow(self.nav_rows[module_id])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "pages"):
+            self._resize_standard_columns()
+        if hasattr(self, "plan_list"):
+            self._resize_plan_columns()
+        if hasattr(self, "nav_spacer"):
+            self._resize_navigation()
+
+    def _refresh_theme_icons(self, *args) -> None:
+        from vstacklens.desktop.navigation_icons import navigation_icon
+        if not hasattr(self, "nav"): return
+        for index in range(self.nav.count()):
+            item = self.nav.item(index); module = item.data(Qt.UserRole)
+            if module: item.setIcon(navigation_icon(module, index == self.nav.currentRow()))
+        if hasattr(self, "current_object_label"): self._update_current_object_bar()
+        if hasattr(self,"standard_task_icon"):
+            self.standard_task_icon.setPixmap(navigation_icon("vcenter_management",size=SIZES["task_icon"]).pixmap(SIZES["task_icon"],SIZES["task_icon"]))
+
+    def _resize_navigation(self):
+        from vstacklens.desktop.navigation_icons import group_geometry
+        available = self.nav.viewport().height() - 24
+        headings = [self.nav.item(i) for i in range(self.nav.count()) if not self.nav.item(i).data(Qt.UserRole) and self.nav.item(i) is not self.nav_spacer]
+        normal = [max(group_geometry(item.font(), n==0)[4], SIZES["navigation_group"] if n==0 else SIZES["navigation_group_later"]) for n,item in enumerate(headings)]
+        compact = available < sum(normal) + 11*SIZES["navigation_row"]
+        heights = [max(group_geometry(item.font(), n==0)[4], SIZES["navigation_group_compact"]) for n,item in enumerate(headings)] if compact else normal
+        row_height = max(32, min(SIZES["navigation_compact"], (available-sum(heights))//11)) if compact else SIZES["navigation_row"]
+        for index in range(self.nav.count()):
+            item = self.nav.item(index)
+            if item.data(Qt.UserRole): item.setSizeHint(QSize(180, row_height))
+        for item,height in zip(headings,heights):item.setSizeHint(QSize(180,height))
+        remaining=max(0,available-sum(heights)-11*row_height)
+        self.nav_spacer.setHidden(remaining<SIZES["navigation_compact"])
+        self.nav_spacer.setSizeHint(QSize(0,remaining))
+
+    def eventFilter(self, watched, event):
+        from PySide6.QtCore import QEvent,QTimer
+        if hasattr(self,"nav") and watched is self.nav.viewport() and event.type()==QEvent.Resize:
+            QTimer.singleShot(0,self._resize_navigation)
+        return super().eventFilter(watched,event)
 
     def _open_risk_center(self, risk_level: str | None = None) -> None:
         self.go_to_module("risk_center")
@@ -1661,12 +1391,25 @@ class MainWindow(QMainWindow):
             self.risk_level_filter.setCurrentText(risk_level)
             self._populate_risk_table()
 
+    def _open_non_reported(self) -> None:
+        self.go_to_module("risk_center")
+        self.risk_non_reported.setChecked(True)
+
+    def _refresh_risk_items(self) -> None:
+        run_id = getattr(self, "_caliber_run_id", None)
+        self._risk_items = self.service.list_platform_findings(self._db_path(), run_id, include_non_reported=self.risk_non_reported.isChecked()) if run_id else []
+        self._populate_risk_table()
+
+    @staticmethod
+    def _caliber_label(item) -> str:
+        return (getattr(item, "customer_caliber", {}) or {}).get("health", {}).get("label", "旧口径")
+
     @staticmethod
     def _dashboard_health_status_key(label: str) -> str:
         text = label.strip()
         if text in {"健康", "正常"}:
             return "success"
-        if text in {"关注", "需要关注", "评估受限", "历史状态未记录"}:
+        if text in {"关注", "存在整改事项", "需要关注", "评估受限", "历史状态未记录", "旧口径"}:
             return "warning"
         if text in {"危险", "高风险", "异常"}:
             return "danger"
@@ -1681,11 +1424,15 @@ class MainWindow(QMainWindow):
 
     def _load_saved_config(self) -> None:
         cfg = self.service.load_config()
+        self.ui_theme_combo.blockSignals(True)
+        self.ui_theme_combo.setCurrentIndex(max(0, self.ui_theme_combo.findData(cfg.ui_theme)))
+        self.ui_theme_combo.blockSignals(False)
+        apply_application_theme(QApplication.instance(), cfg.ui_theme)
         self.vcenter_input.setText(cfg.vcenter)
         self.username_input.setText(cfg.username)
         self.customer_input.setText(cfg.customer_name or DEFAULT_CUSTOMER_NAME)
         self.report_title_input.setText(cfg.report_title or DEFAULT_REPORT_TITLE)
-        self.site_input.setText(DEFAULT_SITE_NAME)
+        self.site_input.setText(cfg.site_name or DEFAULT_SITE_NAME)
         self.report_dir_input.set_path_value(str(cfg.report_output_dir))
         self.log_customer_input.setText(cfg.customer_name or DEFAULT_CUSTOMER_NAME)
         self.log_report_title_input.setText(DEFAULT_LOG_ANALYSIS_TITLE)
@@ -1707,6 +1454,15 @@ class MainWindow(QMainWindow):
         self._load_security_settings()
         self._refresh_upgrade_hcl_status()
 
+    def _ui_theme_changed(self, *_args: object) -> None:
+        theme = str(self.ui_theme_combo.currentData() or "light")
+        apply_application_theme(QApplication.instance(), theme)
+        # Persist only the theme alongside already-saved settings. Do not save
+        # unrelated edits currently present in the desktop form.
+        cfg = self.service.load_config()
+        cfg.ui_theme = theme
+        self.service.save_config(cfg)
+
     def _current_config(self) -> DesktopInspectionConfig:
         report_dir_text = self.report_dir_input.path_value() or self.default_report_dir_input.path_value()
         return DesktopInspectionConfig(
@@ -1716,11 +1472,13 @@ class MainWindow(QMainWindow):
             port=443,
             ssl_no_verify=False,
             customer_name=self.customer_input.text(),
-            site_name=DEFAULT_SITE_NAME,
+            site_name=self.site_input.text() or DEFAULT_SITE_NAME,
+            environment_id=self._inspection_environment_id,
             report_title=self.report_title_input.text(),
             report_output_dir=Path(report_dir_text or DesktopInspectionConfig().report_output_dir),
             db_path=Path(self.db_path_input.path_value() or DesktopInspectionConfig().db_path),
             rulepack_path=Path(self.rulepack_path_input.path_value() or DesktopInspectionConfig().rulepack_path),
+            ui_theme=str(self.ui_theme_combo.currentData() or "light"),
         )
 
     def _settings_config(self) -> DesktopInspectionConfig:
@@ -1733,13 +1491,14 @@ class MainWindow(QMainWindow):
             port=443,
             ssl_no_verify=False,
             customer_name=cfg.customer_name,
-            site_name=DEFAULT_SITE_NAME,
+            site_name=cfg.site_name,
             report_title=cfg.report_title,
             report_output_dir=Path(self.default_report_dir_input.path_value() or cfg.report_output_dir),
             db_path=cfg.db_path,
             rulepack_path=cfg.rulepack_path,
             model_config_profiles=[item.normalized() for item in self._model_profiles],
             security_privacy_level=str(self.privacy_level_combo.currentData() or "standard"),
+            ui_theme=cfg.ui_theme,
         )
 
     def _current_log_analysis_config(self) -> LogAnalysisConfig:
@@ -1827,7 +1586,7 @@ class MainWindow(QMainWindow):
             return
         self.upgrade_hcl_import_button.setEnabled(False)
         self.upgrade_start_button.setEnabled(False)
-        self.upgrade_cancel_button.setEnabled(True)
+        self.upgrade_cancel_button.setEnabled(False)
         self.upgrade_hcl_import_status.setText("正在导入 HCL 判据数据，请稍候。")
         self.upgrade_hcl_import_worker = UpgradeHclImportWorker(
             self.service,
@@ -1877,6 +1636,12 @@ class MainWindow(QMainWindow):
         sources = state["sources"]
         self._set_upgrade_status_badge(self.upgrade_vcg_badge, "VCG", sources["vcg"])
         self._set_upgrade_status_badge(self.upgrade_vsan_badge, "vSAN HCL", sources["vsan_hcl"])
+        for key, source in (("vcg", "vcg"), ("vsan_hcl", "vsan_hcl")):
+            label = getattr(self, "upgrade_hcl_timestamps", {}).get(key)
+            if label:
+                stamp = sources[source].get("json_updated_time") or sources[source].get("downloaded_at")
+                label.setText("更新时间：" + material_date(stamp))
+                label.setToolTip(str(stamp or ""))
         baseline = state.get("baseline") or {}
         baseline_version = str(baseline.get("version") or "未标记版本")
         self.upgrade_hcl_status_label.setText(
@@ -2381,12 +2146,21 @@ class MainWindow(QMainWindow):
             self.current_password_input.setFocus()
 
     def _start_inspection(self) -> None:
+        if self.worker is not None or self._running or self._batch_closing:
+            return
+        if self._has_product_scope():
+            self._start_product_inspection()
+            return
+        if hasattr(self, "product_scope_checks") and not self.product_scope_checks["vcenter"].isChecked():
+            QMessageBox.warning(self, "未选择巡检范围", "请至少选择一个产品范围。")
+            return
         cfg = self._current_config()
         errors = self.service.validate_config(cfg)
         if errors:
             QMessageBox.warning(self, "配置校验失败", "\n".join(errors))
             return
         self.current_result = None
+        self._standard_presentation()
         self.start_button.setEnabled(False)
         self.cancel_inspection_button.setEnabled(True)
         self.cancel_inspection_button.show()
@@ -2396,105 +2170,157 @@ class MainWindow(QMainWindow):
         self.open_dir_button.setEnabled(False)
         self.result_summary.clear()
         self.progress_bar.setValue(0)
-        self.stage_label.setText("准备启动")
-        self.status_label.setText("正在初始化健康评估任务。")
-        self.result_summary.setText("等待开始评估\n准备启动健康评估任务。")
+        self.stage_label.setText(ui_text("准备启动"))
+        self.status_label.setText(ui_text("正在初始化健康评估任务。"))
+        self.result_summary.append("等待开始评估\n准备启动健康评估任务。")
         self.worker = InspectionWorker(self.service, cfg)
         self.worker.progress.connect(self._inspection_progress)
         self.worker.completed.connect(self._inspection_completed)
         self.worker.failed.connect(self._inspection_failed)
         self.worker.finished.connect(self._worker_finished)
         self._running = True
+        self.inspection_environment_combo.setEnabled(False)
         self.worker.start()
 
     def _cancel_inspection(self) -> None:
         if not self.worker or not self._running:
             return
         self.cancel_inspection_button.setEnabled(False)
-        self.stage_label.setText("正在取消巡检")
-        self.status_label.setText("已请求取消，正在等待当前可中断步骤结束。")
-        self.result_summary.setText("已请求取消当前健康评估。底层采集若正在执行，将在下一个可中断点结束。")
+        self.stage_label.setText(ui_text("正在取消巡检"))
+        self.status_label.setText(ui_text("已请求取消，正在等待当前可中断步骤结束。"))
+        self.result_summary.append("已请求取消当前健康评估。底层采集若正在执行，将在下一个可中断点结束。")
         self.worker.request_cancel()
 
     def _inspection_completed(self, result: InspectionRunResult) -> None:
         self._running = False
+        self.inspection_environment_combo.setEnabled(True)
         self.current_result = result
         self.start_button.setEnabled(True)
         self.cancel_inspection_button.setEnabled(False)
         self.cancel_inspection_button.hide()
-        self.open_report_button.setEnabled(result.report_path.exists())
-        self.open_word_button.setEnabled(bool(result.docx_path and result.docx_path.exists()))
-        self.open_pdf_button.setEnabled(bool(result.pdf_path and result.pdf_path.exists()))
-        self.open_dir_button.setEnabled(True)
-        self.progress_bar.setValue(100)
-        self.stage_label.setText("健康评估完成")
-        generated = []
-        if result.report_path.exists():
-            generated.append("HTML 报告包")
-        if result.pdf_path and result.pdf_path.exists():
-            generated.append("PDF 报告")
-        if result.docx_path and result.docx_path.exists():
-            generated.append("Word 报告")
-        self.status_label.setText("巡检完成，已生成" + "、".join(generated) + "。" if generated else "巡检完成，但报告文件均未生成。")
+        available = self._available_standard_reports(result)
+        self.open_report_button.setEnabled("HTML" in available)
+        self.open_word_button.setEnabled("Word" in available)
+        self.open_pdf_button.setEnabled("PDF" in available)
+        self.open_dir_button.setEnabled(result.report_dir.is_dir())
+        missing = [name for name in ("HTML", "Word", "PDF") if name not in available]
+        errors = [message for message in (result.html_error, result.docx_error, result.pdf_error,
+                                          result.delivery_error, result.error) if message]
+        cancelled = result.state == InspectionState.CANCELLED or result.stage == "cancelled"
+        failed = result.state != InspectionState.COMPLETED or result.stage != "success" or errors or missing
+        generated = "、".join(available)
+        if cancelled:
+            self.progress_bar.setValue(min(self.progress_bar.value(), 99))
+            self.stage_label.setText(ui_text("巡检已取消"))
+            status = "当前健康评估已取消，未标记为成功。"
+        elif failed:
+            self.progress_bar.setValue(100)
+            partial = bool(available) and (missing or result.stage == "delivery_failed" or result.delivery_error)
+            self.stage_label.setText(ui_text("报告部分交付失败" if partial else "健康评估失败"))
+            status = (f"已保留可用报告：{generated}。" if available else "没有可交付的客户报告。")
+            if missing:
+                status += "不可用格式：" + "、".join(missing) + "。"
+
+            def brief_reason(message: str) -> str:
+                text = " ".join(message.split()) or "未提供详细原因"
+                return text[:96] + "…" if len(text) > 96 else text
+
+            reasons = []
+            remaining_error = result.error or ""
+            for name, error in (("HTML", result.html_error), ("Word", result.docx_error), ("PDF", result.pdf_error)):
+                if name in missing:
+                    reasons.append(f"{name}：{brief_reason(error or '报告未登记成功或文件不存在。')}")
+                if error:
+                    remaining_error = remaining_error.replace(error, "")
+            if result.delivery_error:
+                reasons.append("内部交付：" + brief_reason(result.delivery_error))
+                remaining_error = remaining_error.replace(result.delivery_error, "")
+            remaining_error = remaining_error.strip("；; \n")
+            if remaining_error:
+                reasons.append("任务：" + brief_reason(remaining_error))
+            if reasons:
+                status += "；".join(reasons) + "。完整原因见详细运行记录。"
+        else:
+            self.progress_bar.setValue(100)
+            self.stage_label.setText(ui_text("健康评估完成"))
+            status = f"巡检完成，已生成{generated}报告。"
+        self.status_label.setText(ui_text(status))
         risk_total = actionable_risk_total(result.risk_summary)
         optimization_total = int(result.risk_summary.get("P4", 0) or 0)
         summary_lines = [
             f"任务 ID：{result.run_id}",
-            f"健康状态：{self.service._health_status(result.score, result.risk_summary)}",
+            f"健康状态：{self._caliber_label(result)}",
             f"风险总数：{risk_total}",
             f"优化建议：{optimization_total}",
         ]
-        if result.report_path.exists():
-            summary_lines.append(f"HTML 报告：{result.report_path}")
-        elif result.html_error:
-            summary_lines.append(result.html_error)
-        if result.docx_path:
-            summary_lines.append(f"Word 报告：{result.docx_path}")
-        elif result.docx_error:
-            summary_lines.append(result.docx_error)
-        if result.pdf_path:
-            summary_lines.append(f"PDF 报告：{result.pdf_path}")
-        elif result.pdf_error:
-            summary_lines.append(result.pdf_error)
-        self.result_summary.setText(
+        for name, error in (("HTML", result.html_error), ("Word", result.docx_error), ("PDF", result.pdf_error)):
+            if name in available:
+                summary_lines.append(f"{name} 报告：{available[name]}")
+            else:
+                summary_lines.append(f"{name} 不可用：{error or '报告未登记成功或文件不存在。'}")
+        summary_lines.extend(dict.fromkeys(message for message in (result.delivery_error, result.error) if message))
+        self.result_summary.append(
             "\n".join(summary_lines)
         )
         self._refresh_all_data()
+        self.inspection_result_label.clear()
+        self.view_standard_report_button.setEnabled(any((self.open_report_button.isEnabled(), self.open_word_button.isEnabled(), self.open_pdf_button.isEnabled())))
+        self._standard_presentation(result)
+
+    @staticmethod
+    def _available_standard_reports(result: InspectionRunResult) -> dict[str, Path]:
+        # Rejected artifacts may be retained as quarantined evidence. Existence
+        # alone must never re-enable a report that failed delivery or scanning.
+        return {name: path for name, path, error in (
+            ("HTML", result.report_path, result.html_error),
+            ("Word", result.docx_path, result.docx_error),
+            ("PDF", result.pdf_path, result.pdf_error),
+        ) if not error and path is not None and path.is_file()}
 
     def _inspection_failed(self, error: str) -> None:
         message = friendly_error_message(error)
         self._running = False
+        self.inspection_environment_combo.setEnabled(True)
         self.start_button.setEnabled(True)
         self.cancel_inspection_button.setEnabled(False)
         self.cancel_inspection_button.hide()
+        self.open_report_button.setEnabled(False)
         self.open_word_button.setEnabled(False)
         self.open_pdf_button.setEnabled(False)
-        self.progress_bar.setValue(100)
+        self.view_standard_report_button.setEnabled(False)
         if "取消" in message:
-            self.stage_label.setText("巡检已取消")
-            self.status_label.setText("当前健康评估已取消，未标记为成功。")
+            self.progress_bar.setValue(min(self.progress_bar.value(), 99))
+            self.stage_label.setText(ui_text("巡检已取消"))
+            self.status_label.setText(ui_text("当前健康评估已取消，未标记为成功。"))
         else:
-            self.stage_label.setText("健康评估失败")
-            self.status_label.setText("请检查连接、账号或采集条件。")
-        self.result_summary.setText(message)
+            self.progress_bar.setValue(100)
+            self.stage_label.setText(ui_text("健康评估失败"))
+            self.status_label.setText(ui_text("请检查连接、账号或采集条件。"))
+        self.result_summary.append(message)
         if "取消" not in message:
             QMessageBox.warning(self, "健康评估失败", message)
         self._refresh_all_data()
 
     def _inspection_progress(self, progress: InspectionProgress) -> None:
         self.progress_bar.setValue(progress.percent)
-        self.stage_label.setText(progress.message)
-        self.status_label.setText(f"当前阶段：{progress.message}，进度 {progress.percent}%")
+        self.stage_label.setText(ui_text(progress.message))
+        self.status_label.setText(ui_text(f"当前阶段：{progress.message}，进度 {progress.percent}%"))
         if progress.state in {InspectionState.CANCELLED, InspectionState.CANCELLING}:
             self.cancel_inspection_button.setEnabled(False)
         self._append_progress_log(progress)
+        self._localize_visible_text()
         if progress.error:
-            self.result_summary.setText(friendly_error_message(progress.error))
+            self.result_summary.append(friendly_error_message(progress.error))
 
     def _worker_finished(self) -> None:
         if self.worker is not None:
             self.worker.deleteLater()
             self.worker = None
+        self._running = False
+        self._clear_product_credentials()
+        self._set_product_controls_running(False)
+        self.inspection_environment_combo.setEnabled(not self._batch_closing)
+        self.start_button.setEnabled(not self._batch_closing)
 
     def _start_log_analysis(self) -> None:
         cfg = self._current_log_analysis_config()
@@ -2504,19 +2330,20 @@ class MainWindow(QMainWindow):
             return
         if self.log_cloud_enabled_input.isChecked() and not cfg.cloud_assist_enabled:
             if self._current_privacy_level() == "local-only":
-                self.log_result_summary.setText("当前安全策略为仅本地，已自动切换为本地规则分析。")
+                self.log_result_summary.setText(ui_text("当前安全策略为仅本地，已自动切换为本地规则分析。"))
             else:
-                self.log_result_summary.setText("当前模型配置档案未配置完整或尚未保存，已自动切换为本地规则分析。")
+                self.log_result_summary.setText(ui_text("当前模型配置档案未配置完整或尚未保存，已自动切换为本地规则分析。"))
         self.current_log_result = None
         self.log_start_button.setEnabled(False)
+        self._log_step_index=0;self._batch2_log_state("started","进行中")
         self.open_log_html_button.setEnabled(False)
         self.open_log_word_button.setEnabled(False)
         self.open_log_dir_button.setEnabled(False)
         self.log_result_summary.clear()
         self.log_progress_bar.setValue(0)
-        self.log_stage_label.setText("准备日志分析")
-        self.log_status_label.setText("正在读取日志包。")
-        self.log_result_summary.setText("0% 准备日志分析")
+        self.log_stage_label.setText(ui_text("准备日志分析"))
+        self.log_status_label.setText(ui_text("正在读取日志包。"))
+        self.log_result_summary.setText(ui_text("0% 准备日志分析"))
         self.log_worker = LogAnalysisWorker(self.service, cfg)
         self.log_worker.progress.connect(self._log_analysis_progress)
         self.log_worker.completed.connect(self._log_analysis_completed)
@@ -2531,12 +2358,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "升级兼容性校验失败", "\n".join(errors))
             return
         self.current_upgrade_result = None
+        self.upgrade_workspace.set_phase("running")
+        self.upgrade_result_tree.clear()
+        self.upgrade_server_summary.clear()
+        self.upgrade_cancel_button.setEnabled(True)
         self.upgrade_start_button.setEnabled(False)
         self.upgrade_open_html_button.setEnabled(False)
         self.upgrade_progress_bar.setValue(0)
-        self.upgrade_stage_label.setText("准备升级兼容性检查")
-        self.upgrade_status_label.setText("正在采集硬件与驱动信息。")
-        self.upgrade_result_summary.setText("0% 准备升级兼容性检查")
+        self.upgrade_stage_label.setText(ui_text("准备升级兼容性检查"))
+        self.upgrade_status_label.setText(ui_text("正在采集硬件与驱动信息。"))
+        self.upgrade_result_summary.setText(ui_text("0% 准备升级兼容性检查"))
         self.upgrade_worker = UpgradeCompatWorker(self.service, cfg)
         self.upgrade_worker.progress.connect(self._upgrade_compat_progress)
         self.upgrade_worker.completed.connect(self._upgrade_compat_completed)
@@ -2548,24 +2379,31 @@ class MainWindow(QMainWindow):
         if self.upgrade_worker is not None:
             self.upgrade_worker.request_cancel()
             self.upgrade_cancel_button.setEnabled(False)
-            self.upgrade_status_label.setText("已请求取消，将在当前读取步骤完成后停止。")
+            self.upgrade_status_label.setText(ui_text("已请求取消，将在当前读取步骤完成后停止。"))
 
     def _upgrade_compat_progress(self, progress: UpgradeCompatProgress) -> None:
+        self.upgrade_workspace.set_phase("cancelled" if progress.stage=="cancelled" else "failed" if progress.stage=="failed" else "running")
         self.upgrade_progress_bar.setValue(progress.percent)
-        self.upgrade_stage_label.setText(progress.message)
-        self.upgrade_status_label.setText(f"当前阶段：{progress.message}，进度 {progress.percent}%")
+        self.upgrade_stage_label.setText("完成" if progress.stage=="success" else "已取消" if progress.stage=="cancelled" else "连接诊断" if progress.stage=="connection_diagnostic" else "进行中")
+        self.upgrade_status_label.setText(ui_text(f"当前阶段：{progress.message}，进度 {progress.percent}%"))
         line = f"{progress.percent}% {progress.message}"
-        if line not in self.upgrade_result_summary.toPlainText(): self.upgrade_result_summary.append(line)
-        if progress.error: self.upgrade_result_summary.setText(friendly_error_message(progress.error))
+        if line not in self.upgrade_result_summary.toPlainText(): self.upgrade_result_summary.append(ui_text(line))
+        if progress.error: self.upgrade_result_summary.setText(ui_text(friendly_error_message(progress.error)))
 
     def _upgrade_compat_completed(self, result: UpgradeCompatResult) -> None:
+        self._batch2_upgrade_results(result)
+        self.upgrade_workspace.set_phase("cancelled" if result.cancelled else "failed" if result.connection_diagnostic else "completed")
+        self.upgrade_tree_height.queue()
+        for item in self.upgrade_result_tree.findItems("",Qt.MatchContains|Qt.MatchRecursive):
+            for column in range(5):item.setToolTip(column,item.text(column))
+        self.upgrade_result_tree.header().setMaximumSectionSize(440)
         self.current_upgrade_result = result
         self.upgrade_start_button.setEnabled(True)
         self.upgrade_cancel_button.setEnabled(False)
         self.upgrade_open_html_button.setEnabled(bool(result.html_path and result.html_path.exists()))
         self.upgrade_progress_bar.setValue(100)
-        self.upgrade_stage_label.setText("升级兼容性检查已取消" if result.cancelled else ("升级兼容性检查完成" if not result.connection_diagnostic else "连接诊断完成"))
-        self.upgrade_status_label.setText("已取消，未生成报告。" if result.cancelled else (result.connection_diagnostic or "独立 HTML 升级兼容性报告已生成。"))
+        self.upgrade_stage_label.setText("已取消" if result.cancelled else "完成" if not result.connection_diagnostic else "连接诊断完成")
+        self.upgrade_status_label.setText(ui_text("已取消，未生成报告。" if result.cancelled else (result.connection_diagnostic or "独立 HTML 升级兼容性报告已生成。")))
         if result.connection_diagnostic:
             for metric_card in (self.upgrade_metric_total, self.upgrade_metric_pass, self.upgrade_metric_fail, self.upgrade_metric_unknown):
                 self._set_upgrade_metric_value(metric_card, "—")
@@ -2582,7 +2420,7 @@ class MainWindow(QMainWindow):
             self.upgrade_device_table.insertRow(row)
             matches = item.get("matches") or {}
             values = [item.get("object_name"), item.get("category"), (matches.get("vcg") or {}).get("status"), (item.get("vsan") or {}).get("status"), (matches.get("vcg") or {}).get("detail") or (item.get("vsan") or {}).get("detail") or ""]
-            for column, value in enumerate(values): self.upgrade_device_table.setItem(row, column, QTableWidgetItem(str(value or "")))
+            for column, value in enumerate(values): self.upgrade_device_table.setItem(row, column, QTableWidgetItem(ui_text(str(value or ""))))
         lines = [f"任务 ID：{result.run_id}"]
         if result.connection_diagnostic:
             lines.append(f"连接诊断：{result.connection_diagnostic}")
@@ -2591,16 +2429,18 @@ class MainWindow(QMainWindow):
             lines.append(f"设备：{result.summary.get('total', 0)} · 通过：{result.summary.get('passed', 0)} · 不通过：{result.summary.get('failed', 0)} · 无法确定：{result.summary.get('unknown', 0)}")
         if result.html_path: lines.append(f"HTML 报告：{result.html_path}")
         if result.collection_warnings: lines.append(f"采集警告：{len(result.collection_warnings)} 项")
-        self.upgrade_result_summary.setText("\n".join(lines))
+        self.upgrade_result_summary.setText(ui_text("\n".join(lines)))
         self._refresh_upgrade_hcl_status()
+        self._upgrade_task_phase_changed(self.upgrade_workspace.phase)
 
     def _upgrade_compat_failed(self, error: str) -> None:
+        self.upgrade_workspace.set_phase("failed")
         self.upgrade_start_button.setEnabled(True)
         self.upgrade_cancel_button.setEnabled(False)
         self.upgrade_progress_bar.setValue(100)
-        self.upgrade_stage_label.setText("升级兼容性检查失败")
-        self.upgrade_status_label.setText("请检查 HCL 数据、采集路径和本地目录权限。")
-        self.upgrade_result_summary.setText(friendly_error_message(error))
+        self.upgrade_stage_label.setText(ui_text("升级兼容性检查失败"))
+        self.upgrade_status_label.setText(ui_text("请检查 HCL 数据、采集路径和本地目录权限。"))
+        self.upgrade_result_summary.setText(ui_text(friendly_error_message(error)))
         QMessageBox.warning(self, "升级兼容性检查失败", friendly_error_message(error))
 
     def _upgrade_worker_finished(self) -> None:
@@ -2612,15 +2452,17 @@ class MainWindow(QMainWindow):
     def _set_upgrade_metric_value(self, card: MetricCard, value: object) -> None:
         label = next((item for item in card.findChildren(QLabel) if item.objectName() == "metricValue"), None)
         if label is not None: label.setText(str(value))
+        self._batch2_metric_status(card,value)
 
     def _log_analysis_completed(self, result: LogAnalysisResult) -> None:
+        self._batch2_log_state("completed","完成")
         self.current_log_result = result
         self.log_start_button.setEnabled(True)
         self.open_log_html_button.setEnabled(result.html_path.exists())
         self.open_log_word_button.setEnabled(result.docx_path.exists())
         self.open_log_dir_button.setEnabled(result.report_dir.exists())
         self.log_progress_bar.setValue(100)
-        self.log_stage_label.setText("日志分析完成")
+        self.log_stage_label.setText(ui_text("日志分析完成"))
         engine = result.diagnosis.get("diagnosis_engine") if isinstance(result.diagnosis, dict) else {}
         model_quality = str(engine.get("model_quality") or "").strip().lower() if isinstance(engine, dict) else ""
         customer_report_mode = str(engine.get("customer_report_mode") or "rule_based").strip().lower() if isinstance(engine, dict) else "rule_based"
@@ -2629,16 +2471,16 @@ class MainWindow(QMainWindow):
         api_response_received = bool(engine.get("api_response_received")) if isinstance(engine, dict) else False
         if model_quality == "accepted" and customer_report_mode == "cloud_assisted":
             mode_line = "报告模式：云端模型辅助诊断"
-            self.log_status_label.setText("独立 HTML / Word 日志分析报告已生成。")
+            self.log_status_label.setText(ui_text("独立 HTML / Word 日志分析报告已生成。"))
         elif model_quality in {"downgraded", "rejected", "failed"}:
             mode_line = "报告模式：本地规则分析报告"
-            self.log_status_label.setText("云端辅助未达到客户报告标准，本次生成的是本地规则分析报告。")
+            self.log_status_label.setText(ui_text("云端辅助未达到客户报告标准，本次生成的是本地规则分析报告。"))
         elif fallback_reason:
             mode_line = "报告模式：离线日志粗排查（云端模型输出未通过质量门禁）"
-            self.log_status_label.setText("云端模型未调用成功，本次生成的是本地规则分析报告。")
+            self.log_status_label.setText(ui_text("云端模型未调用成功，本次生成的是本地规则分析报告。"))
         else:
             mode_line = "报告模式：离线日志粗排查"
-            self.log_status_label.setText("独立 HTML / Word 日志粗排查报告已生成。")
+            self.log_status_label.setText(ui_text("独立 HTML / Word 日志粗排查报告已生成。"))
         model_used = bool(engine.get("model_used")) if isinstance(engine, dict) else False
         model_source = str(engine.get("model_source") or "rule_only") if isinstance(engine, dict) else "rule_only"
         cloud_provider = str(engine.get("cloud_provider") or "") if isinstance(engine, dict) else ""
@@ -2673,34 +2515,37 @@ class MainWindow(QMainWindow):
             lines.insert(2, "云端 API 已响应，但模型输出未通过质量门禁，本次生成的是日志粗排查报告。")
         elif fallback_reason:
             lines.insert(2, "云端模型未调用成功，本次生成的是日志粗排查报告。")
-        self.log_result_summary.setText("\n".join(lines))
+        self.log_result_summary.setText(ui_text("\n".join(lines)))
         self._refresh_all_data()
 
     def _log_analysis_failed(self, error: str) -> None:
+        self._batch2_log_state("failed","失败")
         message = friendly_error_message(error)
         self.log_start_button.setEnabled(True)
         self.open_log_html_button.setEnabled(False)
         self.open_log_word_button.setEnabled(False)
         self.open_log_dir_button.setEnabled(False)
-        self.log_progress_bar.setValue(100)
-        self.log_stage_label.setText("日志分析失败")
+        self.log_stage_label.setText(ui_text("日志分析失败"))
         if "大模型分析失败" in message or "模型输出未通过" in message:
-            self.log_status_label.setText("大模型分析失败，未生成客户 HTML / Word 报告。")
+            self.log_status_label.setText(ui_text("大模型分析失败，未生成客户 HTML / Word 报告。"))
         else:
-            self.log_status_label.setText("请检查日志包格式、本地目录权限或稍后重试。")
-        self.log_result_summary.setText(message)
+            self.log_status_label.setText(ui_text("请检查日志包格式、本地目录权限或稍后重试。"))
+        self.log_result_summary.setText(ui_text(message))
         QMessageBox.warning(self, "日志分析失败", message)
         self._refresh_all_data()
 
     def _log_analysis_progress(self, progress: LogAnalysisProgress) -> None:
-        self.log_progress_bar.setValue(progress.percent)
-        self.log_stage_label.setText(progress.message)
-        self.log_status_label.setText(f"当前阶段：{progress.message}，进度 {progress.percent}%")
+        state = "失败" if progress.stage=="failed" else "完成" if progress.stage=="success" else "进行中"
+        self._batch2_log_state(progress.stage,state)
+        if progress.stage != "failed":self.log_progress_bar.setValue(progress.percent)
+        self.log_stage_label.setText(state)
+        shown_percent = self.log_progress_bar.value()
+        self.log_status_label.setText(ui_text(f"当前阶段：{progress.message}，进度 {shown_percent}%"))
         line = f"{progress.percent}% {progress.message}"
         if line not in self.log_result_summary.toPlainText():
-            self.log_result_summary.append(line)
+            self.log_result_summary.append(ui_text(line))
         if progress.error:
-            self.log_result_summary.setText(friendly_error_message(progress.error))
+            self.log_result_summary.setText(ui_text(friendly_error_message(progress.error)))
 
     def _log_worker_finished(self) -> None:
         if self.log_worker is not None:
@@ -2712,7 +2557,7 @@ class MainWindow(QMainWindow):
         if not stage_text:
             return
         existing = self.result_summary.toPlainText()
-        line = f"{progress.percent}% {stage_text}"
+        line = ui_text(f"{progress.percent}% {stage_text}")
         if line not in existing:
             self.result_summary.append(line)
 
@@ -2724,84 +2569,82 @@ class MainWindow(QMainWindow):
         return self.service.isolated_upgrade_compat_database_path(self._db_path())
 
     def _refresh_all_data(self) -> None:
+        if getattr(self, "_refreshing_data", False):
+            return
+        self._refreshing_data = True
+        try:
+            self._refresh_all_data_impl()
+        finally:
+            self._refreshing_data = False
+
+    def _refresh_all_data_impl(self) -> None:
         db_path = self._db_path()
-        dashboard = self.service.get_dashboard_data(db_path)
+        dashboard = self.service.get_latest_valid_desktop_data(db_path)
         self._populate_dashboard(dashboard)
-        history_rows = self.service.list_report_history(db_path)
-        self._populate_history_table(self.dashboard_reports_table, history_rows[:6])
+        scope = {"environment_id": self._environment_id} if self._environment_id else {}
+        self._scope_overview = self.service.get_latest_valid_desktop_data(db_path, **scope) if scope else dashboard
+        scoped_data = self._scope_overview
+        history_rows = self.service.list_report_history(db_path, **scope)
+        self._populate_desktop_tasks(self.inspection_tasks_table, history_rows)
+        latest = history_rows[0] if history_rows else None
+        self.inspection_latest_task.setText(f"{self._short_task(latest.run_id)} · {local_time(latest.finished_at or latest.updated_at)}" if latest else "尚无巡检记录")
+        self.inspection_latest_task.setToolTip(latest.run_id if latest else "")
+        self.inspection_latest_state.setText(ui_text(latest.run_status) if latest else "等待开始")
+        self.inspection_latest_state.setProperty("status", latest.run_status if latest else "unknown")
         report_root = Path(self.default_report_dir_input.path_value() or self.report_dir_input.path_value() or DesktopInspectionConfig().report_output_dir)
         self._populate_reports(
-            self.service.list_report_packages(
+            self._merge_product_report_items(self.service.list_report_packages(
                 db_path,
                 report_root=report_root,
                 compat_db_path=self._compat_db_path(),
-            )
+                **scope,
+            ))
         )
-        self._risk_items = self.service.list_platform_findings(db_path, dashboard.run_id)
-        self._asset_items = self.service.list_platform_assets(db_path, dashboard.run_id)
-        self._check_evidence_items = self.service.list_certificate_license_evidence(db_path, dashboard.run_id)
+        self._caliber_run_id = scoped_data.run_id
+        self._risk_items = self.service.list_platform_findings(db_path, scoped_data.run_id, include_non_reported=self.risk_non_reported.isChecked()) if scoped_data.run_id else []
+        self._asset_items = self.service.list_platform_assets(db_path, scoped_data.run_id) if scoped_data.run_id else []
+        self._check_evidence_items = self.service.list_certificate_license_evidence(db_path, scoped_data.run_id) if scoped_data.run_id else []
         self._populate_risk_table()
         self._populate_asset_table()
         self._populate_check_evidence()
         self._populate_vcenter_center()
+        self._populate_product_targets()
         self._populate_history_compare()
+        self._update_current_object_bar()
+        self._localize_visible_text()
+
+    def _update_current_object_bar(self):
+        from html import escape
+        data = getattr(self, "_overview", None)
+        product_text = self._product_context_text() if hasattr(self, "_product_context_text") else None
+        if product_text and getattr(self, "_active_module", "") not in {"log_analysis", "vcenter_management"}:
+            text = escape(product_text)
+        elif getattr(self, "_active_module", "") == "log_analysis": text = "本次无需连接 vCenter"
+        elif getattr(self, "_active_module", "") == "vcenter_management": text = "环境档案 · 本机登记的客户环境（实时连接未检测）"
+        elif getattr(self, "_active_module", "") == "inspection_center":
+            target = next((e for e in self._environment_archives if e.environment_id == self._inspection_environment_id), None)
+            index = self.inspection_pages.currentIndex()
+            text = "计划标准巡检 · 各计划使用独立目标与会话授权" if index == 3 else "批量标准巡检 · 各项独立环境和报告，不切换单环境结果范围" if index == 2 else escape(f"本次巡检目标：{target.customer_name} / {target.name} · {target.address}" if target else "标准巡检 · 手动输入目标（结果以对应任务为准）")
+            if index == 4:
+                text = "产品结果 · 已保存证据、来源与验证层级"
+            elif index == 1 and self._has_product_scope():
+                text = "综合巡检（实验） · 显式选择产品目标，按目标独立认证"
+        elif self._environment_id:
+            env = next((e for e in self._environment_archives if e.environment_id == self._environment_id), None)
+            text = escape(f"限定环境：{env.customer_name} / {env.name} · {env.address}" if env else "所选环境不存在，请取消环境限定")
+        elif not data or not data.has_data: text = "尚无巡检记录"
+        else:
+            label_style = f'color:{COLORS["subtext"]};font-size:{TYPOGRAPHY["secondary"]}px;'
+            value_style = f'font-size:{TYPOGRAPHY["context_value"]}px;font-weight:700;'
+            text = (f'<span style="{label_style}">客户：</span><span style="{value_style}">{escape(data.customer_name)}</span>'
+                    f'　　<span style="{label_style}">vCenter：</span><span style="{value_style}">{escape(data.vcenter)}</span>'
+                    f'　<span style="{label_style}">（最近一次巡检）</span>')
+        self.current_object_label.setText(text)
+        self.current_object_label.setToolTip(self.current_object_label.text())
+        self.clear_environment_button.setVisible(bool(self._environment_id or getattr(self, "_product_scope_target_id", None)))
 
     def _populate_dashboard(self, data: DashboardData) -> None:
-        health_status = str(data.health_status or "评估受限")
-        self.dashboard_health_value.setText(health_status)
-        self.dashboard_health_badge.setText(health_status)
-        self.dashboard_health_badge.setProperty("status", self._dashboard_health_status_key(health_status))
-        self.dashboard_health_badge.style().unpolish(self.dashboard_health_badge)
-        self.dashboard_health_badge.style().polish(self.dashboard_health_badge)
-        if not data.has_data:
-            self.dashboard_health_value.setText("等待首次评估")
-            self.dashboard_health_badge.setText("等待首次评估")
-            self.dashboard_scope_label.setText("暂无评估范围 · 完成首次健康评估后进入平台首页")
-            self.risk_waiting_card.show()
-            self.asset_waiting_card.show()
-            for card in self.risk_metric_cards:
-                card.hide()
-            for card in self.asset_metric_widgets:
-                card.hide()
-            self.trend_text.setText("完成首次健康评估后，将展示过去 30 天风险趋势。")
-            self.trend_chart.set_data([])
-            self.dashboard_certificate_summary.setText("本次尚无证书或授权核验数据。完成巡检后在此展示。")
-            self.dashboard_certificate_detail.clear()
-            self.dashboard_certificate_detail.hide()
-            self.dashboard_certificate_toggle.setEnabled(False)
-            self.dashboard_reports_empty.show()
-            self.dashboard_reports_table.hide()
-            self.scope_label.hide()
-            self.scope_hint.show()
-            return
-        self.risk_waiting_card.hide()
-        self.asset_waiting_card.hide()
-        for card in self.risk_metric_cards:
-            card.show()
-        for card in self.asset_metric_widgets:
-            card.show()
-        for level, label in self.risk_metric_labels.items():
-            label.setText(str(data.risk_summary.get(level, 0)))
-        for name, label in self.asset_metric_cards.items():
-            label.setText(str(data.asset_summary.get(name, 0)))
-        if data.risk_trend:
-            last = data.risk_trend[-1]
-            self.trend_text.setText(
-                f"最近 {len(data.risk_trend)} 次评估，最新风险总数 {last.get('risk_total', 0)}，"
-                f"优化建议 {last.get('optimization_total', 0)}。"
-            )
-        else:
-            self.trend_text.setText("暂无历史数据。完成评估后将展示过去 30 次风险趋势。")
-        self.trend_chart.set_data(data.risk_trend)
-        self._populate_history_table(self.dashboard_reports_table, data.recent_reports[:6])
-        self.dashboard_reports_empty.setVisible(not bool(data.recent_reports))
-        self.dashboard_reports_table.setVisible(bool(data.recent_reports))
-        self.scope_hint.hide()
-        self.scope_label.show()
-        self.scope_label.setText(f"{data.customer_name}\n{data.vcenter}")
-        self.dashboard_scope_label.setText(
-            f"{self._dashboard_health_reason(data.health_status, data.health_impact)}\n{data.customer_name} · {data.vcenter}"
-        )
+        return Layout3aMixin._populate_dashboard(self, data)
 
     @staticmethod
     def _dashboard_health_reason(status: str, health_impact: dict[str, int]) -> str:
@@ -2809,73 +2652,24 @@ class MainWindow(QMainWindow):
             return f"发现 {int(health_impact.get('critical', 0) or 0)} 项影响环境可用性的严重问题"
         if status == "关注":
             return "存在需要安排处理的健康关注项"
-        if status == "正常":
+        if status == "存在整改事项":
             return "存在一般维护问题，当前未发现严重健康影响"
+        if status == "旧口径":
+            return "当次证据不完整，保留旧口径，不按零风险处理"
         if status == "评估受限":
             return "关键检查覆盖受限，当前结论仅基于已确认数据"
         return "本次必要检查未发现需处理的运行风险"
 
     def _populate_reports(self, rows: list[ReportCenterItem]) -> None:
-        self._report_items = rows[:80]
-        self._populate_report_list(rows[:50])
-        has_reports = bool(rows)
-        self.report_center_empty.setVisible(not has_reports)
-        self.report_splitter.setVisible(has_reports)
-        if not has_reports:
-            self.report_detail.setText("暂无报告。完成健康评估或日志分析后，将展示报告摘要和打开入口。")
-            self.open_selected_report_button.setEnabled(False)
-            self.open_selected_dir_button.setEnabled(False)
-            self.report_copy_path_button.setEnabled(False)
-            self.report_word_button.setEnabled(False)
-            self.report_pdf_button.setEnabled(False)
-            self.delete_report_button.setEnabled(False)
-        elif self.report_list.currentRow() < 0:
-            self.report_list.setCurrentRow(0)
+        Layout3a2Mixin._populate_reports(self, rows)
+        if self._environment_id and not rows:
+            ids = self.service.environment_run_ids(self._db_path(), self._environment_id)
+            self.report_center_empty.setText("该环境尚无巡检记录，完成巡检后可查看报告。" if not ids else "该环境没有可用报告：生成未成功或文件缺失。历史巡检记录仍保留。")
+        else:
+            self.report_center_empty.setText("尚无实际生成的报告")
 
-    def _populate_report_list(self, rows: list[ReportCenterItem]) -> None:
-        if not hasattr(self, "report_list"):
-            return
-        self.report_list.blockSignals(True)
-        self.report_list.clear()
-        for index, item in enumerate(rows):
-            if self._is_log_report_item(item):
-                assets = item.asset_summary
-                text = "\n".join(
-                    [
-                        item.title or DEFAULT_LOG_ANALYSIS_TITLE,
-                        f"客户 {item.customer_name or DEFAULT_CUSTOMER_NAME} · {item.report_type}",
-                        f"日志文件 {assets.get('LogFile', 0)} · 关键证据 {assets.get('Evidence', 0)} · 建议处理项 {assets.get('Recommendation', 0)} · {item.status}",
-                        item.assessment_time or "暂无分析时间",
-                    ]
-                )
-            elif self._is_upgrade_report_item(item):
-                assets = item.asset_summary
-                text = "\n".join(
-                    [
-                        item.title or DEFAULT_UPGRADE_COMPAT_TITLE,
-                        f"客户 {item.customer_name or DEFAULT_CUSTOMER_NAME} · {item.report_type}",
-                        f"目标 {item.site_name} · 设备 {assets.get('Device', 0)} · 通过 {assets.get('Passed', 0)} · 阻塞 {assets.get('Failed', 0)} · 待核对 {assets.get('Unknown', 0)} · {item.status}",
-                        item.assessment_time or "暂无检查时间",
-                    ]
-                )
-            else:
-                risk_total = actionable_risk_total(item.risk_summary)
-                optimization_total = int(item.risk_summary.get("P4", 0) or 0)
-                assets = item.asset_summary
-                text = "\n".join(
-                    [
-                        item.title or DEFAULT_REPORT_TITLE,
-                        f"客户 {item.customer_name or DEFAULT_CUSTOMER_NAME} · {item.report_type}",
-                        f"健康状态 {self.service._health_status(item.score if isinstance(item.score, (int, float)) else None, item.risk_summary)} · 风险 {risk_total} · 优化建议 {optimization_total} · {item.status}",
-                        f"Host {assets.get('Host', 0)} · VM {assets.get('VM', 0)} · Datastore {assets.get('Datastore', 0)}",
-                        item.assessment_time or "暂无评估时间",
-                    ]
-                )
-            entry = QListWidgetItem(text)
-            entry.setData(Qt.UserRole, index)
-            entry.setSizeHint(QSize(360, 124))
-            self.report_list.addItem(entry)
-        self.report_list.blockSignals(False)
+    def _populate_report_list(self, rows=None) -> None:
+        return Layout3a2Mixin._populate_report_list(self ,rows)
 
     def _populate_history_table(self, table: QTableWidget, rows: list[ReportHistoryItem]) -> None:
         table.setRowCount(len(rows))
@@ -2886,13 +2680,13 @@ class MainWindow(QMainWindow):
                 item.customer_name,
                 item.vcenter,
                 item.run_status,
-                self.service._health_status(item.score, item.risk_summary) if hasattr(item, "risk_summary") else "查看报告",
+                item.health_status,
                 str(risk_total),
             ]
             if table.columnCount() > 6:
                 values.append(str(item.report_path or ""))
             for column, value in enumerate(values):
-                cell = QTableWidgetItem(value)
+                cell = QTableWidgetItem(ui_text(value))
                 cell.setData(Qt.UserRole, str(item.report_path or ""))
                 table.setItem(index, column, cell)
         table.resizeColumnsToContents()
@@ -2902,70 +2696,20 @@ class MainWindow(QMainWindow):
             table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
 
     def _populate_risk_table(self) -> None:
-        if not hasattr(self, "risk_list"):
-            return
-        if not self._risk_items:
-            self.risk_empty.show()
-            self.risk_splitter.hide()
-            self.risk_detail.setText("暂无风险数据。")
-            return
-        self.risk_empty.hide()
-        self.risk_splitter.show()
-        level = self.risk_level_filter.currentText()
-        object_type = self.risk_type_filter.currentText()
-        keyword = self.risk_keyword_input.text().strip().lower()
-        rows = []
-        for item in self._risk_items:
-            if level != "全部等级" and item.risk_level != level:
-                continue
-            if object_type != "全部对象" and item.object_type != object_type:
-                continue
-            haystack = f"{item.title} {item.object_name} {item.impact} {item.remediation}".lower()
-            if keyword and keyword not in haystack:
-                continue
-            rows.append(item)
-        self._filtered_risk_items = rows
-        self.risk_list.blockSignals(True)
-        self.risk_list.clear()
-        for row, item in enumerate(rows):
-            entry = QListWidgetItem()
-            entry.setData(Qt.UserRole, row)
-            entry.setSizeHint(QSize(420, 84))
-            self.risk_list.addItem(entry)
-            card = QFrame()
-            card.setObjectName("sectionCard")
-            card_layout = QHBoxLayout(card)
-            card_layout.setContentsMargins(12, 10, 12, 10)
-            card_layout.setSpacing(10)
-            card_layout.addWidget(risk_badge(item.risk_level))
-            text = QLabel(f"{item.title}\n{item.object_type} · {item.object_name}\n{self._risk_status_text(item.status)}")
-            text.setWordWrap(True)
-            card_layout.addWidget(text, 1)
-            self.risk_list.setItemWidget(entry, card)
-        self.risk_list.blockSignals(False)
-        if rows:
-            self.risk_list.setCurrentRow(0)
-            self._show_risk_detail(rows[0])
-        else:
-            self.risk_detail.setText("暂无符合筛选条件的风险。")
+        return Layout3aMixin._populate_risk_table(self)
 
     def _risk_selection_changed(self, *_args) -> None:
-        row = self.risk_list.currentRow()
-        if row < 0:
-            return
-        rows = getattr(self, "_filtered_risk_items", [])
-        if row >= len(rows):
-            return
-        self._show_risk_detail(rows[row])
+        return Layout3aMixin._risk_selection_changed(self)
 
-    def _show_risk_detail(self, item: PlatformFindingItem) -> None:
+    def _engineer_risk_detail(self, item: PlatformFindingItem) -> None:
         affected = "、".join(item.affected_components) if item.affected_components else "无"
         source = self._business_source_label(item.object_type, item.source_path)
-        self.risk_detail.setText(
+        self.risk_detail.setPlainText(
             "\n".join(
                 [
                     f"风险名称：{item.title}",
                     f"风险等级：{item.risk_level}",
+                    f"客户报告：{item.non_report_reason or '纳入'}",
                     f"影响对象：{item.object_name}",
                     "",
                     f"当前观察值：{item.current_observed or '未记录'}",
@@ -3021,7 +2765,7 @@ class MainWindow(QMainWindow):
             self.dashboard_certificate_summary.setText("本次评估未形成证书或授权核验记录；该区域保持评估受限，不按正常处理。")
             self.dashboard_certificate_list.clear()
             self.dashboard_certificate_list.hide()
-            self.dashboard_certificate_detail.setText("暂无核验明细。")
+            self.dashboard_certificate_detail.setText(ui_text("暂无核验明细。"))
             self.dashboard_certificate_detail.hide()
             self.dashboard_certificate_toggle.setEnabled(False)
             self.dashboard_certificate_toggle.setText("查看核验明细")
@@ -3063,11 +2807,11 @@ class MainWindow(QMainWindow):
                 remaining = item.current_observed
             expiry_text = f"到期 {expires_on}" if expires_on else (f"剩余 {remaining} 天（到期日未采集）" if remaining not in (None, "", "未记录") else "到期日未采集")
             label = f"{item.object_name} · {self._check_status_text(item.result_status)}\n{expiry_text}"
-            entry = QListWidgetItem(label)
+            entry = QListWidgetItem(ui_text(label))
             entry.setSizeHint(QSize(280, 52))
             self.dashboard_certificate_list.addItem(entry)
         self.dashboard_certificate_list.setVisible(self.dashboard_certificate_list.count() > 0)
-        self.dashboard_certificate_detail.setText("\n\n".join(details))
+        self.dashboard_certificate_detail.setText(ui_text("\n\n".join(details)))
         self.dashboard_certificate_toggle.setEnabled(True)
 
     def _check_evidence_selection_changed(self, *_args) -> None:
@@ -3079,7 +2823,7 @@ class MainWindow(QMainWindow):
     def _show_check_evidence_detail(self, item: CheckEvidenceItem) -> None:
         source = self._business_source_label(item.object_type, item.source_path, item.rule_id)
         self.check_evidence_detail.setText(
-            "\n".join(
+            ui_text("\n".join(
                 [
                     f"核验类别：{self._check_category_label(item)}",
                     f"状态：{self._check_status_text(item.result_status)}",
@@ -3092,7 +2836,7 @@ class MainWindow(QMainWindow):
                     f"采集时间：{item.collected_at or '未记录'}",
                     f"说明：{item.explanation or item.evidence_summary or '已根据采集到的环境状态完成核验。'}",
                 ]
-            )
+            ))
         )
 
     def _check_category_label(self, item: CheckEvidenceItem) -> str:
@@ -3151,47 +2895,7 @@ class MainWindow(QMainWindow):
         }.get(status, status or "未知")
 
     def _populate_asset_table(self) -> None:
-        if not hasattr(self, "asset_table"):
-            return
-        if not self._asset_items:
-            self.asset_empty.show()
-            self.asset_splitter.hide()
-            return
-        self.asset_empty.hide()
-        self.asset_splitter.show()
-        self._refresh_asset_category_buttons()
-        selected = self.asset_type_filter.currentText()
-        keyword = self.asset_search_input.text().strip().lower()
-        rows = []
-        for item in self._asset_items:
-            if selected != "全部对象" and item.object_type_label != selected:
-                continue
-            haystack = f"{item.object_name} {item.location} {item.detail}".lower()
-            if keyword and keyword not in haystack:
-                continue
-            rows.append(item)
-        sort_name = self.asset_sort_filter.currentText()
-        if sort_name == "按对象类型":
-            rows.sort(key=lambda item: (item.object_type_label, item.object_name.casefold()))
-        elif sort_name == "按位置":
-            rows.sort(key=lambda item: (item.location.casefold(), item.object_name.casefold()))
-        else:
-            rows.sort(key=lambda item: item.object_name.casefold())
-        self._asset_display_rows = rows
-        headers = self._asset_headers(selected)
-        self.asset_table.setHorizontalHeaderLabels(headers)
-        self.asset_table.setRowCount(len(rows))
-        for row, item in enumerate(rows):
-            values = self._asset_row_values(item, selected)
-            for col, value in enumerate(values):
-                self.asset_table.setItem(row, col, QTableWidgetItem(value))
-        self.asset_table.resizeColumnsToContents()
-        self.asset_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        if rows:
-            self.asset_table.setCurrentCell(0, 0)
-            self._show_asset_detail(rows[0])
-        else:
-            self.asset_detail.setText("暂无符合筛选条件的资产。")
+        return Layout3a2Mixin._populate_asset_table(self)
 
     def _refresh_asset_category_buttons(self) -> None:
         counts = {"全部对象": len(self._asset_items)}
@@ -3255,42 +2959,10 @@ class MainWindow(QMainWindow):
             self._show_asset_detail(rows[row])
 
     def _show_asset_detail(self, item: PlatformAssetItem) -> None:
-        self.asset_detail.setText(
-            "\n".join(
-                [
-                    f"对象类型：{item.object_type_label}",
-                    f"对象名称：{item.object_name}",
-                    f"完整位置：{item.location or '未记录'}",
-                    f"属性：{self._friendly_asset_detail(item.detail)}",
-                    f"数据来源：巡检记录 {item.run_id}",
-                ]
-            )
-        )
+        return Layout3a2Mixin._show_asset_detail(self ,item)
 
     def _populate_vcenter_center(self) -> None:
-        self._clear_layout(self.vcenter_cards)
-        rows = self.service.list_vcenter_summaries(self._db_path())
-        if not rows:
-            self.vcenter_stack.setCurrentIndex(0)
-            return
-        self.vcenter_stack.setCurrentIndex(1)
-        for index, item in enumerate(rows):
-            card = InfoCard(
-                item.host,
-                "已纳入健康评估平台的 vCenter 对象。",
-                status=self._status_badge_key(item.latest_status, item.latest_score),
-                details=[
-                    ("名称", item.name),
-                    ("版本", item.version),
-                    ("Build", item.build),
-                    ("连接状态", self._connection_status_text(item.latest_status)),
-                    ("健康状态", self._health_label(item.latest_score)),
-
-                ],
-                button_text="查看资产入口",
-                on_click=lambda: self.go_to_module("asset_center"),
-            )
-            self.vcenter_cards.addWidget(card, index // 3, index % 3)
+        return EnvironmentArchiveMixin._populate_vcenter_center(self)
 
     def _status_badge_key(self, status: str, score: float | None = None) -> str:
         lowered = (status or "").lower()
@@ -3313,14 +2985,15 @@ class MainWindow(QMainWindow):
         }.get(status or "", "未知")
 
     def _connection_status_text(self, status: str) -> str:
-        return "在线" if status == "success" else "异常" if status == "failed" else "未知"
+        return "未实时检测"
 
     def _health_label(self, score: float | None) -> str:
         # Historical numeric scores are not a health-state classifier.
         return "查看最近报告" if score is not None else "评估受限"
 
     def _populate_history_compare(self) -> None:
-        comparison = self.service.get_history_comparison(self._db_path())
+        scope = {"environment_id": self._environment_id} if self._environment_id else {}
+        comparison = self.service.get_history_comparison(self._db_path(), **scope)
         self._history_comparison = comparison
         self._populate_history_options(comparison)
         self._render_history_comparison(comparison)
@@ -3354,18 +3027,13 @@ class MainWindow(QMainWindow):
             return
         baseline = self.baseline_run_combo.currentData()
         comparison = self.comparison_run_combo.currentData()
-        payload = self.service.get_history_comparison(self._db_path(), str(baseline or ""), str(comparison or ""))
+        scope = {"environment_id": self._environment_id} if self._environment_id else {}
+        payload = self.service.get_history_comparison(self._db_path(), str(baseline or ""), str(comparison or ""), **scope)
         self._history_comparison = payload
         self._render_history_comparison(payload)
 
-    @staticmethod
-    def _history_option_label(option) -> str:
-        """选项文字包含巡检时间、vCenter 环境、健康度和风险数，便于识别记录来源。"""
-        label = str(getattr(option, "label", "") or "").strip()
-        if label:
-            return label
-        stamp = str(getattr(option, "timestamp", "") or "").replace("T", " ")[:16] or "未命名评估"
-        return f"{stamp} · 风险 {getattr(option, 'risk_total', 0)}"
+    def _history_option_label(self,option):
+        return local_time(option.timestamp)+" · "+self._short_task(option.run_id)
 
     @staticmethod
     def _history_summary_without_score(text: str) -> str:
@@ -3378,7 +3046,7 @@ class MainWindow(QMainWindow):
         scope = str(getattr(comparison, "environment_label", "") or "").strip()
         return f"对比范围：{scope}" if scope else ""
 
-    def _render_history_comparison(self, comparison: HistoryComparison) -> None:
+    def _legacy_render_history_comparison(self, comparison: HistoryComparison) -> None:
         summary_text = self._history_summary_without_score(comparison.summary_text)
         scope_text = self._history_scope_text(comparison)
         if scope_text and comparison.state != "empty":
@@ -3416,6 +3084,9 @@ class MainWindow(QMainWindow):
         self._populate_history_risk_changes()
         self._populate_history_asset_changes()
 
+    def _render_history_comparison(self,comparison):
+        return Layout3a2Mixin._render_history_comparison(self,comparison)
+
     def _history_metric_text(self, delta) -> str:
         baseline = "--" if delta.baseline in (None, "") else str(delta.baseline)
         comparison = "--" if delta.comparison in (None, "") else str(delta.comparison)
@@ -3435,27 +3106,7 @@ class MainWindow(QMainWindow):
         return f"增加 {shown}" if number > 0 else f"减少 {shown}"
 
     def _populate_history_risk_changes(self) -> None:
-        if not hasattr(self, "history_risk_list"):
-            return
-        self.history_risk_list.clear()
-        comparison = self._history_comparison
-        if comparison is None or comparison.state != "ready":
-            return
-        selected = self.history_risk_filter.currentText()
-        groups = []
-        if selected in {"全部", "新增"}:
-            groups.extend(comparison.risk_changes.get("new", []))
-        if selected in {"全部", "本次未再检出"}:
-            groups.extend(comparison.risk_changes.get("closed", []))
-        if selected in {"全部", "持续"}:
-            groups.extend(comparison.risk_changes.get("persistent", []))
-        self._history_risk_groups = groups
-        if not groups:
-            entry = QListWidgetItem("暂无符合筛选条件的风险变化。")
-            entry.setSizeHint(QSize(420, 52))
-            self.history_risk_list.addItem(entry)
-            return
-        self._render_history_page("risk")
+        return Layout3a2Mixin._populate_history_risk_changes(self)
 
     def _history_risk_filter_changed(self) -> None:
         self._history_risk_page = 0
@@ -3468,25 +3119,7 @@ class MainWindow(QMainWindow):
         self._render_history_page(category)
 
     def _render_history_page(self, category: str) -> None:
-        groups = list(getattr(self, f"_history_{category}_groups", []))
-        list_widget = self.history_risk_list if category == "risk" else self.history_asset_list
-        label = self.history_risk_page_label if category == "risk" else self.history_asset_page_label
-        previous = self.history_risk_prev if category == "risk" else self.history_asset_prev
-        following = self.history_risk_next if category == "risk" else self.history_asset_next
-        list_widget.clear()
-        page_size = 50
-        pages = max(1, (len(groups) + page_size - 1) // page_size)
-        page_name = f"_history_{category}_page"
-        page = min(max(0, int(getattr(self, page_name, 0) or 0)), pages - 1)
-        setattr(self, page_name, page)
-        label.setText(f"共 {len(groups)} 项 · 第 {page + 1} / {pages} 页")
-        previous.setEnabled(page > 0)
-        following.setEnabled(page < pages - 1)
-        for item in groups[page * page_size : (page + 1) * page_size]:
-            if category == "risk":
-                self._add_history_risk_item(item)
-            else:
-                self._add_history_asset_item(item)
+        return Layout3a2Mixin._render_history_page(self ,category)
 
     def _add_history_risk_item(self, item: HistoryRiskChangeItem) -> None:
         entry = QListWidgetItem()
@@ -3513,22 +3146,7 @@ class MainWindow(QMainWindow):
         self.history_risk_list.setItemWidget(entry, card)
 
     def _populate_history_asset_changes(self) -> None:
-        if not hasattr(self, "history_asset_list"):
-            return
-        self.history_asset_list.clear()
-        comparison = self._history_comparison
-        if comparison is None or comparison.state != "ready":
-            return
-        groups = []
-        for key in ("new", "removed", "persistent"):
-            groups.extend(comparison.asset_changes.get(key, []))
-        self._history_asset_groups = groups
-        if not groups:
-            entry = QListWidgetItem("暂无资产变化。")
-            entry.setSizeHint(QSize(420, 52))
-            self.history_asset_list.addItem(entry)
-            return
-        self._render_history_page("asset")
+        return Layout3a2Mixin._populate_history_asset_changes(self)
 
     def _add_history_asset_item(self, item: HistoryAssetChangeItem) -> None:
         entry = QListWidgetItem()
@@ -3551,10 +3169,13 @@ class MainWindow(QMainWindow):
     def _history_asset_status_key(self, status: str) -> str:
         return {"new": "success", "removed": "warning", "persistent": "info"}.get(status, "info")
 
-    def _report_selection_changed(self) -> None:
+    def _engineer_report_selection_changed(self) -> None:
         item = self._selected_report_item()
+        if self._is_product_report_item(item):
+            self._product_report_selected(item)
+            return
         if item is None:
-            self.report_detail.setText("请选择左侧报告。")
+            self.report_detail.setText(ui_text("请选择左侧报告。"))
             self.open_selected_report_button.setEnabled(False)
             self.open_selected_dir_button.setEnabled(False)
             self.report_copy_path_button.setEnabled(False)
@@ -3573,7 +3194,7 @@ class MainWindow(QMainWindow):
             assets = item.asset_summary
             findings = "\n".join(f"- {text}" for text in item.top_risks[:5]) or "- 暂无诊断摘要"
             self.report_detail.setText(
-                "\n".join(
+                ui_text("\n".join(
                     [
                         f"报告标题：{item.title}",
                         f"客户名称：{item.customer_name}",
@@ -3592,14 +3213,14 @@ class MainWindow(QMainWindow):
                         f"说明：{item.history_summary}",
                         f"完整报告路径：{item.report_path or item.report_dir}",
                     ]
-                )
+                ))
             )
             return
         if self._is_upgrade_report_item(item):
             assets = item.asset_summary
             findings = "\n".join(f"- {text}" for text in item.top_risks[:5]) or "- 未发现阻塞项"
             self.report_detail.setText(
-                "\n".join(
+                ui_text("\n".join(
                     [
                         f"报告标题：{item.title}",
                         f"客户名称：{item.customer_name}",
@@ -3616,7 +3237,7 @@ class MainWindow(QMainWindow):
                         f"说明：{item.history_summary}",
                         f"完整报告路径：{item.report_path or item.report_dir}",
                     ]
-                )
+                ))
             )
             return
         risk_total = actionable_risk_total(item.risk_summary)
@@ -3625,7 +3246,7 @@ class MainWindow(QMainWindow):
         assets = item.asset_summary
         top_risks = "\n".join(f"- {text}" for text in item.top_risks[:5]) or "- 暂无 TOP 风险"
         self.report_detail.setText(
-            "\n".join(
+            ui_text("\n".join(
                 [
                     f"报告标题：{item.title}",
                     f"客户名称：{item.customer_name}",
@@ -3633,8 +3254,8 @@ class MainWindow(QMainWindow):
                     f"报告状态：{item.status}",
                     f"报告格式：{item.report_type}",
                     "",
-                    f"健康状态：{self.service._health_status(item.score if isinstance(item.score, (int, float)) else None, item.risk_summary)}",
-                    f"风险摘要：{risks} · 总计 {risk_total} · 优化建议 {optimization_total}",
+                    f"健康状态：{self._caliber_label(item)}",
+                    f"问题类别：{risks} · 总计 {risk_total} · 去重涉及对象 {item.customer_caliber.get('affected_total', '—')}",
                     f"资产摘要：Host {assets.get('Host', 0)} · VM {assets.get('VM', 0)} · Datastore {assets.get('Datastore', 0)}",
                     "",
                     "TOP 风险：",
@@ -3643,8 +3264,11 @@ class MainWindow(QMainWindow):
                     f"历史对比摘要：{item.history_summary or '暂无历史对比摘要'}",
                     f"完整报告路径：{item.report_path or item.report_dir}",
                 ]
-            )
+            ))
         )
+
+    def _report_selection_changed(self,*args):
+        return Layout3a2Mixin._report_selection_changed(self,*args)
 
     def _clear_layout(self, layout) -> None:
         while layout.count():
@@ -3663,24 +3287,42 @@ class MainWindow(QMainWindow):
     def _open_current_report(self) -> None:
         if not self.current_result:
             return
-        if self.current_result.report_path.exists():
-            self._open_path_safe(self.current_result.report_path)
+        if hasattr(self.current_result, "modules"):
+            path = self._available_product_reports(self.current_result.run_id).get("HTML")
+            if path is not None:
+                self._open_path_safe(path)
+            return
+        path = self._available_standard_reports(self.current_result).get("HTML")
+        if path is not None:
+            self._open_path_safe(path)
             return
         QMessageBox.information(self, "HTML 报告未生成", self.current_result.html_error or "当前巡检未生成 HTML 报告。")
 
     def _open_current_word_report(self) -> None:
         if not self.current_result:
             return
-        if self.current_result.docx_path and self.current_result.docx_path.exists():
-            self._open_path_safe(self.current_result.docx_path)
+        if hasattr(self.current_result, "modules"):
+            path = self._available_product_reports(self.current_result.run_id).get("Word")
+            if path is not None:
+                self._open_path_safe(path)
+            return
+        path = self._available_standard_reports(self.current_result).get("Word")
+        if path is not None:
+            self._open_path_safe(path)
             return
         QMessageBox.information(self, "Word 报告未生成", self.current_result.docx_error or "当前巡检未生成 Word 报告。")
 
     def _open_current_pdf_report(self) -> None:
         if not self.current_result:
             return
-        if self.current_result.pdf_path and self.current_result.pdf_path.exists():
-            self._open_path_safe(self.current_result.pdf_path)
+        if hasattr(self.current_result, "modules"):
+            path = self._available_product_reports(self.current_result.run_id).get("PDF")
+            if path is not None:
+                self._open_path_safe(path)
+            return
+        path = self._available_standard_reports(self.current_result).get("PDF")
+        if path is not None:
+            self._open_path_safe(path)
             return
         QMessageBox.information(self, "PDF 报告未生成", self.current_result.pdf_error or "当前巡检未生成 PDF 报告。")
 
@@ -3760,6 +3402,8 @@ class MainWindow(QMainWindow):
 
     def _remove_selected_report(self) -> None:
         item = self._selected_report_item()
+        if self._is_product_report_item(item):
+            return
         if item is None:
             return
         reply = QMessageBox.question(
@@ -3777,12 +3421,11 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "移除失败", "未能保存报告中心的隐藏状态，请稍后重试。")
 
     def _selected_report_item(self) -> ReportCenterItem | None:
-        row = self.report_list.currentRow() if hasattr(self, "report_list") else -1
-        if row < 0 or row >= len(self._report_items):
-            return None
-        return self._report_items[row]
+        return Layout3a2Mixin._selected_report_item(self)
 
     def _word_report_path_for_item(self, item: ReportCenterItem | None) -> Path | None:
+        if self._is_product_report_item(item):
+            return self._available_product_reports(item.run_id).get("Word")
         if item is None:
             return None
         if item.report_path and item.report_path.suffix.lower() == ".docx" and item.report_path.exists():
@@ -3796,6 +3439,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _pdf_report_path_for_item(self, item: ReportCenterItem | None) -> Path | None:
+        if self._is_product_report_item(item):
+            return self._available_product_reports(item.run_id).get("PDF")
         if item is None:
             return None
         if item.report_path and item.report_path.suffix.lower() == ".pdf" and item.report_path.exists():
@@ -3901,33 +3546,19 @@ class MainWindow(QMainWindow):
             self.db_path_input.set_path_value(path)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name.
-        if self._running and self.worker is not None and self.worker.isRunning():
-            reply = QMessageBox.question(
-                self,
-                "健康评估仍在运行",
-                "健康评估任务仍在运行。关闭窗口可能中断当前桌面会话，确认关闭吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                event.ignore()
-                return
-            self.status_label.setText("已请求取消，正在等待当前步骤结束。")
-            self.stage_label.setText("正在取消巡检")
-            self.worker.request_cancel()
-            if not self.worker.wait(3000):
-                event.ignore()
-                return
-        event.accept()
+        self._safe_close(event)
 
 
 def main() -> None:
     log_path = configure_runtime_logging()
     app = QApplication(sys.argv)
+    app.vstacklens_owns_event_loop = True
+    app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(str(app_icon_path())))
     configure_chinese_font(app)
     service = InspectionService()
     config = service.initialize_local_workspace()
+    apply_application_theme(app, config.ui_theme)
     LOGGER.info(
         "Desktop startup version=%s config_path=%s db_path=%s report_dir=%s log_path=%s runtime_mode=%s executable=%s",
         APP_VERSION,

@@ -28,6 +28,9 @@ def write_engineering_diagnostics(
     diagnostics = environment.get("connection_diagnostics", {}) if isinstance(environment, dict) else {}
     security_warnings = environment.get("security_warnings", []) if isinstance(environment, dict) else []
     collection_warnings = environment.get("collection_warnings", []) if isinstance(environment, dict) else []
+    warning_count = environment.get("collection_warning_count") if isinstance(environment, dict) else None
+    if not isinstance(warning_count, int) or isinstance(warning_count, bool) or warning_count < len(collection_warnings):
+        warning_count = len(collection_warnings)
 
     lines = [
         "# VStackLens 工程诊断",
@@ -45,7 +48,9 @@ def write_engineering_diagnostics(
     ]
     for warning in security_warnings:
         lines.append(f"- 安全提示：{sanitize_text(warning, *secrets)}")
-    lines.append(f"- 采集 warning 数量：{len(collection_warnings)}")
+    lines.append(f"- 采集 warning 数量：{warning_count}")
+    if warning_count > min(len(collection_warnings), 10):
+        lines.append(f"- 下列 warning 为节选，展示 {min(len(collection_warnings), 10)} 条。")
     for warning in collection_warnings[:10]:
         if isinstance(warning, dict):
             lines.append(

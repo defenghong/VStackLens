@@ -3162,8 +3162,8 @@ class LogAnalysisService:
 
         supplemental_info = [
             "故障发生时间点和重连虚拟网卡的操作时间。",
-            "迁移任务截图或 vCenter Task/Event 记录，过滤 esx-host-01，覆盖迁移前后时间段。",
-            "esx-host-01 虚拟机“事件”页截图。",
+            "迁移任务截图或 vCenter Task/Event 记录，过滤 example-vm-01，覆盖迁移前后时间段。",
+            "example-vm-01 虚拟机“事件”页截图。",
             "迁移前源主机和迁移后目标主机名称。",
             "VM 迁移前后的端口组、分布式端口、VLAN 信息。",
             "重连虚拟网卡前后的 vNIC connect 状态截图，包括“已连接”和“启动时连接”。",

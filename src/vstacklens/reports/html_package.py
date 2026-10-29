@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from vstacklens.reports.license_evidence import license_summary
+
 import json
 import math
 import os
@@ -7,15 +9,17 @@ import uuid
 import re
 import shutil
 import zipfile
+from copy import deepcopy
 from datetime import date, timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
 
 from vstacklens.db.repositories import actionable_risk_total
-from vstacklens.reports.presentation import append_report_sentence, count_excluded_powered_off_vms, powered_off_exclusion_note
+from vstacklens.reports.presentation import append_report_sentence, count_excluded_powered_off_vms, powered_off_exclusion_note, customer_judgment_metadata
 from vstacklens.reports.html_assets import REPORT_JS, SINGLE_PAGE_REPORT_JS
 from vstacklens.reports.report_model import ReportData
+from vstacklens.reports.customer_format import CAPACITY_NOTE, capacity_bytes_text, capacity_text, capacity_unit, local_time_text, percent_text
 
 
 TOOLS_HTML_RECOMMENDATION = (
@@ -29,29 +33,41 @@ SNAPSHOT_HTML_IMPACT = "长期保留快照会占用存储，可能影响虚拟�
 
 # 这些状态本身就已经是"不可比"的结论，必须原样保留，不能被改写成 ready，
 # 也不能只退化成 single_run 而丢失跨环境提示。
-NON_COMPARABLE_HISTORY_STATES = {"empty", "single_run", "environment_mismatch", "run_unavailable"}
+NON_COMPARABLE_HISTORY_STATES = {"empty", "single_run", "environment_mismatch", "run_unavailable", "legacy_caliber"}
 
 
 class HtmlReportPackageBuilder:
-    def render(self, report: ReportData, context: dict[str, Any], output_dir: Path, zip_package: bool = False) -> tuple[Path, Path | None]:
+    def render(self, report: ReportData, context: dict[str, Any], output_dir: Path, zip_package: bool = False, *, secrets: tuple[str, ...] = ()) -> tuple[Path, Path | None]:
         from vstacklens.application.artifact_publish import staged_report
+        from vstacklens.application.artifact_safety import ensure_artifacts_safe
+        from vstacklens.products.reporting import ensure_report_has_valid_data, has_legacy_sections
+        ensure_report_has_valid_data(report)
         output_dir = Path(output_dir)
         if zip_package and output_dir.with_suffix(".zip").exists() and not output_dir.exists():
             output_dir = output_dir.with_name(output_dir.name + "-" + uuid.uuid4().hex[:10])
         with staged_report(output_dir) as (stage, target):
             (stage / "assets").mkdir()
             (stage / "data").mkdir()
-            customer_payload = self._customer_report_payload(report, context)
-            page_payload = self._single_page_payload(report, context, customer_payload)
-            self._write_json(stage / "data" / "customer_report_payload.json", page_payload)
-            (stage / "assets" / "report.css").write_text(self._single_page_css(), encoding="utf-8")
-            (stage / "assets" / "report.js").write_text(SINGLE_PAGE_REPORT_JS, encoding="utf-8")
-            (stage / "index.html").write_text(self._html(page_payload), encoding="utf-8")
+            evidence_path = None
+            if report.product_modules:
+                from vstacklens.reports.product_evidence import write_into_stage
+                evidence_path = write_into_stage(report, stage, secrets=secrets)
+            if not report.product_modules:
+                from vstacklens.reports.document_html import write_document_html
+                write_document_html(report, context, stage)
+            else:
+                customer_payload = ({} if not has_legacy_sections(report) else self._customer_report_payload(report, context))
+                page_payload = self._single_page_payload(report, context, customer_payload)
+                self._write_json(stage / "data" / "customer_report_payload.json", page_payload)
+                (stage / "assets" / "report.css").write_text(self._single_page_css(), encoding="utf-8")
+                (stage / "assets" / "report.js").write_text(SINGLE_PAGE_REPORT_JS, encoding="utf-8")
+                (stage / "index.html").write_text(self._html(page_payload), encoding="utf-8")
             if zip_package:
                 with zipfile.ZipFile(stage / "report.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
                     for path in stage.rglob("*"):
                         if path.is_file() and path.name != "report.zip":
                             archive.write(path, Path(target.name) / path.relative_to(stage))
+            ensure_artifacts_safe([stage / "index.html", stage / "data" / "customer_report_payload.json", *([evidence_path] if evidence_path else []), *([stage / "report.zip"] if zip_package else [])], secrets=secrets)
         zip_path = target.with_suffix(".zip") if zip_package else None
         if zip_path:
             # Same-volume rename on Windows refuses an existing destination.
@@ -62,12 +78,32 @@ class HtmlReportPackageBuilder:
         return target / "index.html", zip_path
 
     def _single_page_payload(self, report: ReportData, context: dict[str, Any], customer_data: dict[str, Any] | None = None) -> dict[str, Any]:
+        from vstacklens.products.reporting import legacy_assessment_reports, has_legacy_sections
+        assessments = legacy_assessment_reports(report)
+        if len(assessments) > 1:
+            from vstacklens.products.reporting import product_report_view
+            return {"title": report.report_info.report_title, "productReport": product_report_view(report),
+                    "legacyReports": [{"target": metadata["target_name"], "target_id": metadata["target_id"],
+                                       "payload": self._single_page_payload(original, {})} for metadata, original in assessments],
+                    "summary": {}, "problems": [], "passedChecks": [], "inventory": {}, "assets": {},
+                    "report_context": {"report_info": report.report_info.model_dump(), "customer_info": report.customer_info.model_dump()}}
+        if report.product_modules and not has_legacy_sections(report):
+            from vstacklens.products.reporting import product_report_view
+            view = product_report_view(report)
+            return {"title": view["title"], "productReport": view, "summary": {},
+                    "problems": [], "passedChecks": [], "inventory": {}, "assets": {},
+                    "report_context": {"report_info": report.report_info.model_dump(),
+                                       "customer_info": report.customer_info.model_dump()}}
         customer_data = customer_data or self._customer_report_payload(report, context)
         report_context = customer_data.get("report_context", {})
+        from vstacklens.reports.customer_view import customer_display_facts, customer_labels, get_customer_problem_view
+        problem_view = get_customer_problem_view(report, context)
+        display_facts = customer_display_facts(report)
         report_model = report.model_dump()
         asset_inventory = report_model.get("asset_inventory") or {}
         records, asset_summary, datacenter_name, vcenter_record = self._single_page_assets(asset_inventory)
-        vsan_summary = report_context.get("vsan_summary") or {}
+        from vstacklens.reports.customer_view import customer_vsan_summary
+        vsan_summary = customer_vsan_summary(report)
         vsan_cluster_names = [str(name) for name in vsan_summary.get("clusters") or [] if name]
         clusters = []
         cluster_records = records.get("cluster", [])
@@ -83,24 +119,22 @@ class HtmlReportPackageBuilder:
                 "ha": cluster_asset.get("ha", ""),
                 "drs": cluster_asset.get("drs", ""),
                 "hosts": [self._single_page_host_view(item) for item in hosts],
-                "vms": [self._single_page_vm_view(item) for item in vms],
-                "stores": [self._single_page_store_view(item) for item in stores],
+                "vms": self._single_page_vm_views(vms),
+                "stores": self._single_page_store_views(stores),
                 "vsan": self._single_page_vsan(name, hosts, stores, vsan_summary) if is_vsan else None,
             })
 
         powered_off_note = powered_off_exclusion_note(
             count_excluded_powered_off_vms((asset_inventory.get("details") or {}).get("VirtualMachine", []))
         )
-        issues = self._single_page_issues(
-            customer_data.get("findings", []),
-            records,
-            powered_off_note=powered_off_note,
-        )
+        from vstacklens.reports.customer_view import shared_passed_checks
+        issues = [deepcopy(entry.display) for entry in problem_view.categories]
+        issues.sort(key=lambda item: ({"P1":0,"P2":1,"P3":2}.get(item["level"],9),item["title"]))
         visible_risk_counts = {level: sum(item["level"] == level for item in issues) for level in ("P1", "P2", "P3")}
         priority = next((level for level in ("P1", "P2", "P3") if visible_risk_counts[level] > 0), "")
         timing = report_context.get("run_timing") or {}
         identity = self._single_page_identity(report_context, datacenter_name, vcenter_record, records)
-        certificates = self._single_page_certificates(report_context, records, vcenter_record)
+        certificates = self._single_page_customer_certificates(display_facts, records, vcenter_record)
         report_info = report_model.get("report_info") or {}
         customer_info = report_model.get("customer_info") or {}
         scale = [
@@ -109,23 +143,36 @@ class HtmlReportPackageBuilder:
             {"label": "虚拟机", "count": asset_summary.get("VirtualMachine", 0)},
             {"label": "数据存储", "count": asset_summary.get("Datastore", 0)},
         ]
-        passed_checks = self._single_page_passed_checks(report_context, {item["title"] for item in issues})
+        passed_evidence = shared_passed_checks(report, report_context.get("rule_checklist") or report.appendix.get("rule_checklist", []), vsan_summary)
+        passed_checks = [item["label"] for item in passed_evidence]
+        # The customer payload uses public names, not internal result-table keys.
+        from vstacklens.reports.customer_view import public_customer_caliber
+        customer_caliber = public_customer_caliber(problem_view.caliber)
+        if "result_status_summary" in customer_caliber:
+            customer_caliber["check_counts"] = customer_caliber.pop("result_status_summary")
         payload = {
             "title": "VStackLens 虚拟化巡检报告",
             "summary": {
                 "startedAt": timing.get("started_at") or "",
                 "finishedAt": timing.get("finished_at") or "",
-                "judgement": "需关注" if issues else "正常",
-                "problemCount": len(issues),
+                "timeText": " — ".join(filter(None, (local_time_text(timing.get("started_at")), local_time_text(timing.get("finished_at"))))) or local_time_text(report_info.get("generated_at")),
+                "judgement": (report_context.get("customer_caliber") or {}).get("health", {}).get("label", report.health_score.label),
+                "judgmentBoundary": customer_judgment_metadata(report)["boundary"],
+                "problemCount": display_facts["counts"].get("problem_count"),
                 "highestLevel": priority,
             },
-            "environment": {"identity": identity, "certificates": certificates, "scale": scale, "clusters": clusters},
+            "environment": {"identity": identity, "certificates": certificates, "scale": scale, "clusters": clusters,
+                            "capacityNote": CAPACITY_NOTE if any(item.get("diskGb") is not None for item in records.get("vm", [])) or any(item.get("totalGb") is not None for item in records.get("store", [])) or any((item.get("vsan") or {}).get("totalText") for item in clusters) else "",
+                            "network": deepcopy(display_facts.get("network") or {})},
+            "displayFacts": deepcopy(display_facts),
+            "labels": customer_labels(),
             "problems": issues,
             "passedChecks": passed_checks,
+            "passedCheckStatuses": {item["label"]:item["display_status"] for item in passed_evidence},
             "inventory": {
                 "hosts": [self._single_page_host_view(item) for item in records.get("host", [])],
-                "vms": [self._single_page_vm_view(item) for item in records.get("vm", [])],
-                "stores": [self._single_page_store_view(item) for item in records.get("store", [])],
+                "vms": self._single_page_vm_views(records.get("vm", [])),
+                "stores": self._single_page_store_views(records.get("store", [])),
             },
             "assets": {"summary": asset_summary},
             "findings": [
@@ -142,10 +189,15 @@ class HtmlReportPackageBuilder:
                 },
                 "run_timing": {"started_at": timing.get("started_at", ""), "finished_at": timing.get("finished_at", "")},
                 "risk_summary": {**visible_risk_counts, "total": len(issues)},
+                "customer_caliber": customer_caliber,
+                "health_score": {"label": report.health_score.label, "explanation": report.health_score.explanation},
                 "environment_info": {"security_warnings": []},
                 "environment_summary": {"covered_object_total": int(asset_inventory.get("total", 0) or 0)},
             },
         }
+        judgment = customer_judgment_metadata(report)
+        if judgment["mode"] in {"ORIGINAL_WITH_LIMITS", "EXPLICIT_REINTERPRETATION"}:
+            payload["summary"]["judgmentMode"] = judgment["mode"]
         comparison = report_context.get("history_comparison") or {}
         if comparison.get("state") == "ready" and comparison.get("baseline_run_id") and comparison.get("comparison_run_id"):
             safe_comparison = {
@@ -157,19 +209,50 @@ class HtmlReportPackageBuilder:
             payload["summary"]["comparisonText"] = "与上轮巡检相比，" + safe_comparison["summary_text"]
             payload["report_context"]["history_comparison"] = safe_comparison
             payload["report_context"]["appendix"] = {"history_comparison": safe_comparison}
+        from vstacklens.reports.presentation import delivery_overview
+        payload["summary"]["delivery"] = delivery_overview(report)
+        from vstacklens.reports.presentation import customer_check_statistics
+        check_statistics = customer_check_statistics(report, context)
+        payload["summary"]["checkStatistics"] = {
+            key: deepcopy(check_statistics[key])
+            for key in ("total", "passed", "failed", "text", "by_object_type_rows")
+            if key in check_statistics
+        }
+        if report.product_modules:
+            from vstacklens.products.reporting import product_report_view
+            payload["productReport"] = product_report_view(report)
+            payload["title"] = report.report_info.report_title
         return payload
 
     @staticmethod
     def _single_page_host_view(item: dict[str, Any]) -> dict[str, Any]:
-        return {key: item.get(key) for key in ("name", "connectionState", "maintenanceMode", "cpuPct", "memoryPct")}
+        result = {key: item.get(key) for key in ("name", "connectionState", "maintenanceMode", "cpuPct", "memoryPct")}
+        result.update(cpuPctText=percent_text(item.get("cpuPct")), memoryPctText=percent_text(item.get("memoryPct")))
+        return result
 
     @staticmethod
-    def _single_page_vm_view(item: dict[str, Any]) -> dict[str, Any]:
-        return {key: item.get(key) for key in ("name", "hostName", "powerState", "diskGb")}
+    def _single_page_vm_view(item: dict[str, Any], unit: str | None = None) -> dict[str, Any]:
+        result = {key: item.get(key) for key in ("name", "hostName", "powerState", "diskGb")}
+        result["diskText"] = capacity_text(item.get("_diskExactGb", item.get("diskGb")), unit=unit)
+        return result
+
+    def _single_page_vm_views(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unit = capacity_unit([item.get("_diskExactGb", item.get("diskGb")) for item in items])
+        return [self._single_page_vm_view(item, unit) for item in items]
 
     @staticmethod
-    def _single_page_store_view(item: dict[str, Any]) -> dict[str, Any]:
-        return {key: item.get(key) for key in ("name", "type", "totalGb", "usedGb", "freeGb", "usagePct")}
+    def _single_page_store_view(item: dict[str, Any], unit: str | None = None) -> dict[str, Any]:
+        result = {key: item.get(key) for key in ("name", "type", "totalGb", "usedGb", "freeGb", "usagePct")}
+        result.update(totalText=capacity_text(item.get("totalGb"), unit=unit),
+                      usedText=capacity_text(item.get("usedGb"), unit=unit),
+                      usageText=percent_text(item.get("usagePct")))
+        used = item.get("usagePct")
+        result["freeUsageText"] = percent_text(100 - used) if isinstance(used, (int, float)) and not isinstance(used, bool) else ""
+        return result
+
+    def _single_page_store_views(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unit = capacity_unit([item.get(key) for item in items for key in ("totalGb", "usedGb")])
+        return [self._single_page_store_view(item, unit) for item in items]
 
     def _single_page_assets(self, asset_inventory: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int], str, dict[str, Any]]:
         type_names = {
@@ -250,14 +333,18 @@ class HtmlReportPackageBuilder:
                     record["maintenanceMode"] = maintenance is True or str(maintenance).strip().casefold() in {"true", "1", "yes"}
                     record["certificateDate"] = str(properties.get("host_certificate_not_after") or "")
                     record["certificateDays"] = self._single_page_number(properties.get("host_certificate_days_remaining"))
-                    record["licenseType"] = self._single_page_license(properties.get("host_license_name"), properties.get("host_license_expiration_date"))
+                    record["licenseType"] = license_summary(properties, True, str(item.get("object_key") or ""))
                 elif object_type == "VirtualMachine":
                     record["hostName"] = host_name
                     record["powerState"] = self._single_page_power_state(properties.get("power_state"))
                     disks = properties.get("vmdk_inventory") or []
                     disk_bytes = [self._single_page_number(disk.get("capacity_bytes")) for disk in disks if isinstance(disk, dict)]
                     disk_bytes = [value for value in disk_bytes if value is not None]
-                    record["diskGb"] = round(sum(disk_bytes) / (1024 ** 3), 1) if disk_bytes else None
+                    exact_disk_gb = sum(disk_bytes) / (1024 ** 3) if disk_bytes else None
+                    # Preserve the pre-existing public numeric field. Only the
+                    # display string reads exact bytes and uses shared HALF_UP.
+                    record["diskGb"] = round(exact_disk_gb, 1) if exact_disk_gb is not None else None
+                    record["_diskExactGb"] = exact_disk_gb
                 elif object_type == "Datastore":
                     record["type"] = self._single_page_store_type(properties.get("datastore_type"))
                     record["totalGb"] = self._single_page_number(properties.get("datastore_capacity_gb"))
@@ -273,6 +360,10 @@ class HtmlReportPackageBuilder:
                         "totalGb": self._bytes_to_gb(native_total) if native_total is not None else self._single_page_number(properties.get("datastore_capacity_gb")),
                         "usedGb": self._bytes_to_gb(native_used) if native_used is not None else self._single_page_number(properties.get("datastore_used_gb")),
                         "freeGb": self._bytes_to_gb(native_free) if native_free is not None else self._single_page_number(properties.get("datastore_free_gb")),
+                        "totalText": capacity_bytes_text(native_total) if native_total is not None else capacity_text(properties.get("datastore_capacity_gb")),
+                        "usedText": capacity_bytes_text(native_used) if native_used is not None else capacity_text(properties.get("datastore_used_gb")),
+                        "freeText": capacity_bytes_text(native_free) if native_free is not None else capacity_text(properties.get("datastore_free_gb")),
+                        "syncText": capacity_bytes_text(properties.get("vsan_resync_bytes")),
                         "usagePct": self._single_page_number(properties.get("vsan_used_percent")) if properties.get("vsan_used_percent") is not None else self._single_page_number(properties.get("used_percent")),
                         "objects": self._single_page_number(properties.get("vsan_object_count")),
                         "vmdks": self._single_page_number(properties.get("vsan_vmdk_count")),
@@ -335,9 +426,19 @@ class HtmlReportPackageBuilder:
         if per_cluster.get("syncGb") is None:
             per_cluster["syncGb"] = self._bytes_to_gb(summary.get("resync_bytes"))
         per_cluster["disks"] = disks
+        per_cluster["diskGroups"] = len({(disk["host"],disk["group"]) for disk in disks if disk["group"]})
         per_cluster["adapters"] = adapters
         per_cluster["issues"] = self._single_page_vsan_summary_issues(summary)
-        return {key: per_cluster.get(key) for key in ("totalGb", "usedGb", "freeGb", "usagePct", "objects", "vmdks", "syncObjects", "syncGb", "disks", "adapters", "issues")}
+        from vstacklens.reports.customer_view import customer_problem_summary
+        for issue in per_cluster["issues"]:
+            issue["summary_text"] = customer_problem_summary(issue.get("current", ""), issue.get("impact", ""), issue.get("remediation", ""))
+        result = {key: per_cluster.get(key) for key in ("totalGb", "usedGb", "freeGb", "usagePct", "objects", "vmdks", "syncObjects", "syncGb", "disks", "diskGroups", "adapters", "issues")}
+        for source, target in (("totalGb", "totalText"), ("usedGb", "usedText"), ("freeGb", "freeText"), ("syncGb", "syncText")):
+            result[target] = per_cluster.get(target) or capacity_text(result.get(source))
+        if not per_cluster.get("syncText") and summary.get("resync_bytes") is not None:
+            result["syncText"] = capacity_bytes_text(summary["resync_bytes"])
+        result["usageText"] = percent_text(result.get("usagePct"))
+        return result
 
     def _single_page_vsan_summary_issues(self, summary: dict[str, Any]) -> list[dict[str, str]]:
         issues: list[dict[str, str]] = []
@@ -398,7 +499,7 @@ class HtmlReportPackageBuilder:
         start = timing.get("started_at") or ""
         finish = timing.get("finished_at") or ""
         if start or finish:
-            add("巡检时间", self._single_page_date(start or finish))
+            add("巡检时间", " — ".join(filter(None, (local_time_text(start), local_time_text(finish)))))
         return rows
 
     def _single_page_certificates(
@@ -443,19 +544,11 @@ class HtmlReportPackageBuilder:
                 expires = as_of + timedelta(days=days)
             else:
                 return None
-            remaining = (expires - as_of).days
-            expired = remaining <= 0
-            imminent = 0 < remaining <= 90
-            if expired:
-                remaining_label = "已过期"
-            elif remaining <= 180:
-                remaining_label = "3 个月"
-            elif remaining <= 270:
-                remaining_label = "6 个月"
-            elif remaining < 365:
-                remaining_label = "9 个月"
-            else:
-                remaining_label = "1 年及以上"
+            # Preserve saved days; dates are not authority to silently rejudge history.
+            remaining = days
+            expired = remaining is not None and remaining <= 0
+            imminent = remaining is not None and 0 < remaining <= 90
+            remaining_label = f"{remaining} 天" if remaining is not None else "未采集，无法判断"
             return {
                 "name": name,
                 "cluster": cluster_name,
@@ -465,6 +558,8 @@ class HtmlReportPackageBuilder:
                 "imminent": imminent,
                 "expired": expired,
                 "attention": imminent or expired,
+                "dateDerived": direct_date is None,
+                "dataConflict": direct_date is not None and days is not None and abs((direct_date-as_of).days-days)>1,
             }
 
         vcenter_name = str(vcenter_record.get("name") or "")
@@ -496,6 +591,20 @@ class HtmlReportPackageBuilder:
             "clusters": [{"name": name, "hosts": hosts} for name, hosts in cluster_hosts.items()],
             "licenses": list(dict.fromkeys(licenses)),
         }
+
+    @staticmethod
+    def _single_page_customer_certificates(
+        display_facts: dict[str, Any],
+        records: dict[str, list[dict[str, Any]]],
+        vcenter_record: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Consume shared certificate dates/sources without recalculation."""
+        certificates = deepcopy(display_facts.get("certificates") or {})
+        licenses = sorted({str(item.get("licenseType")) for item in records.get("host", []) if item.get("licenseType")})
+        if vcenter_record.get("licenseDays") is not None and vcenter_record["licenseDays"] > 36500:
+            licenses.append("vCenter 永久授权")
+        certificates["licenses"] = list(dict.fromkeys(licenses))
+        return certificates
 
     @staticmethod
     def _is_certificate_evidence(item: dict[str, Any]) -> bool:
@@ -536,16 +645,8 @@ class HtmlReportPackageBuilder:
         *,
         powered_off_note: str = "",
     ) -> list[dict[str, Any]]:
-        groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-        for item in findings:
-            level = str(item.get("risk_level") or "").upper()
-            title = self._single_page_label(item.get("title") or "")
-            if item.get("rule_id") == "VSL-VM-002" and title == "虚拟机未安装 VMware Tools":
-                title = "虚拟机 VMware Tools 未运行"
-            if level not in {"P1", "P2", "P3"} or not title:
-                continue
-            key = (str(item.get("rule_id") or ""), level, title)
-            groups.setdefault(key, []).append(item)
+        from vstacklens.reports.customer_view import group_legacy_html_findings
+        groups = group_legacy_html_findings(findings, self._single_page_label)
 
         assets_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         kind_by_type = {
@@ -582,14 +683,16 @@ class HtmlReportPackageBuilder:
                     location = "、".join(asset.get("clusters") or [])
                 elif object_kind == "vcenter":
                     location = "vCenter 管理平台"
-                objects.append({"name": name, "location": self._single_page_label(location)})
+                basis=self._single_page_safe_detail(finding.get("observed_detail_zh") or finding.get("current_value_zh") or finding.get("evidence_summary_zh"))
+                basis=basis.replace(name,"该对象") if basis else "当次对象证据未记录，需复核原始记录。"
+                objects.append({"name": name, "location": self._single_page_label(location), "level": finding.get("risk_level", level), "basis": basis})
             objects.sort(key=lambda item: (item["name"], item["location"]))
             copy = self._single_page_problem_copy(title, len(objects), items)
-            if _rule_id == "VSL-VM-018" and powered_off_note:
+            if _rule_id in {"VSL-VM-018", "VM-LONG-POWERED-OFF"} and powered_off_note:
                 copy["current"] = append_report_sentence(copy.get("current"), powered_off_note)
             output.append({"level": level, "title": title, "objects": objects, **copy})
         level_order = {"P1": 0, "P2": 1, "P3": 2}
-        visible = [item for item in output if not any(hidden in item["title"].casefold() for hidden in ("vmware tools", "syslog"))]
+        visible = output
         return sorted(visible, key=lambda item: (level_order.get(item["level"], 9), item["title"], len(item["objects"])))
 
     def _single_page_problem_copy(self, title: str, count: int, findings: list[dict[str, Any]]) -> dict[str, str]:
@@ -689,7 +792,7 @@ class HtmlReportPackageBuilder:
         return {"current": current, "expected": expected, "impact": impact, "remediation": remediation}
 
     def _single_page_safe_detail(self, value: Any) -> str:
-        text = self._single_page_label(value or "")
+        text = self._single_page_label(self._clean_customer_text(value or ""))
         if not text:
             return ""
         blocked = ("未确认", "缺字段", "不合规", "未采集", "collected", "not_collected", "unavailable", "unsupported", "permission_denied", "guestToolsNotInstalled", "采集来源", "source_path", "rule_id", "vsan_")
@@ -798,7 +901,8 @@ class HtmlReportPackageBuilder:
         )
         for pattern, replacement in replacements:
             text = re.sub(pattern, replacement, text)
-        return text
+        from vstacklens.reports.customer_view import customer_wording
+        return customer_wording(text)
 
     def _is_preserved_sqlite_file(self, path: Path) -> bool:
         name = path.name.lower()
@@ -849,14 +953,28 @@ class HtmlReportPackageBuilder:
         }
 
     def _customer_report_payload(self, report: ReportData, context: dict[str, Any]) -> dict[str, Any]:
+        from vstacklens.reports.customer_caliber import public_summary
+        from vstacklens.reports.customer_view import get_customer_problem_view
+        shared_problems = get_customer_problem_view(report, context)
+        caliber = shared_problems.caliber
         raw = self._package_data(report, context)
         rule_catalog = [self._customer_rule(rule) for rule in raw["rule_catalog"]]
-        findings = self._customer_visible_findings([self._customer_finding(item) for item in raw["findings"]])
+        findings = [self._customer_finding(item) for item in shared_problems.projected_findings]
         risk_group_summary = self._risk_groups_from_findings(findings)
-        visible_risk = {level: sum(1 for group in risk_group_summary if group.get("risk_level") == level) for level in ("P1", "P2", "P3")}
-        visible_objects = {level: sum(1 for item in findings if item.get("risk_level") == level) for level in ("P1", "P2", "P3")}
+        visible_risk = {level: caliber["counts"][level] for level in ("P1", "P2", "P3")}
+        visible_objects = caliber["affected_counts"]
         run_comparison = self._customer_comparison(raw["run_comparison"])
         report_context = dict(raw["report_context"])
+        customer_environment_keys = {
+            "vcenter", "vcenter_address", "vcenter_name", "vcenter_version", "vcenter_build",
+            "collection_mode", "collection_mode_label", "data_coverage_summary",
+        }
+        report_context["environment_info"] = {
+            key: deepcopy(value) for key, value in (raw["report_context"].get("environment_info") or {}).items()
+            if key in customer_environment_keys
+        }
+        report_context["environment_info"]["security_warnings"] = []
+        report_context["customer_caliber"] = public_summary(caliber)
         report_context["risk_group_summary"] = risk_group_summary
         report_context["risk_summary"] = {**report_context.get("risk_summary", {}), **visible_risk, "total": sum(visible_risk.values())}
         report_context["remediation_tracking"] = run_comparison
@@ -1071,43 +1189,12 @@ class HtmlReportPackageBuilder:
         return self._clean_customer_text(visible)
 
     def _customer_visible_findings(self, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        base = [
-            item
-            for item in findings
-            if str(item.get("risk_level", "")).upper() in {"P1", "P2", "P3"} and not self._is_default_vm_item(item)
-        ]
-        syslog_hosts = {
-            self._object_key(item.get("object_name"))
-            for item in base
-            if self._is_remote_syslog_item(item)
-        }
-        visible: list[dict[str, Any]] = []
-        snapshot_items: dict[str, list[dict[str, Any]]] = {}
-        tools_items: dict[str, list[dict[str, Any]]] = {}
-
-        for item in base:
-            if self._is_tools_item(item):
-                tools_items.setdefault(self._object_key(item.get("object_name")), []).append(item)
-                continue
+        from vstacklens.reports.customer_caliber import calculate, projected_findings
+        rows = projected_findings(calculate(findings))
+        for item in rows:
             if self._is_snapshot_item(item):
-                snapshot_items.setdefault(self._object_key(item.get("object_name")), []).append(item)
-                continue
-            if self._is_log_core_dump_item(item):
-                if self._object_key(item.get("object_name")) in syslog_hosts:
-                    continue
-                visible.append(self._normalize_syslog_item(item))
-                continue
-            if self._is_remote_syslog_item(item):
-                visible.append(self._normalize_syslog_item(item))
-                continue
-            visible.append(self._normalize_alarm_item(item))
-
-        for items in snapshot_items.values():
-            visible.append(self._merged_snapshot_item(items))
-        for items in tools_items.values():
-            visible.append(self._merged_tools_item(items))
-
-        return sorted((self._clean_customer_item(item) for item in visible), key=self._finding_sort_key)
+                item["observed_detail_zh"] = self._snapshot_observed_text([item])
+        return rows
 
     def _risk_groups_from_findings(self, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1117,7 +1204,8 @@ class HtmlReportPackageBuilder:
             rule_id = str(item.get("rule_id") or "")
             if level not in {"P1", "P2", "P3"} or not title:
                 continue
-            key = (rule_id, level)
+            level = str(item.get("category_priority") or level)
+            key = (str(item.get("category_id") or rule_id), level)
             group = groups.setdefault(
                 key,
                 {
@@ -1187,12 +1275,6 @@ class HtmlReportPackageBuilder:
         return text
 
     def _customer_title(self, item: dict[str, Any]) -> str:
-        if self._is_snapshot_item(item):
-            return "虚拟机存在快照"
-        if self._is_tools_item(item):
-            return "虚拟机未安装 VMware Tools"
-        if self._is_remote_syslog_item(item) or self._is_log_core_dump_item(item):
-            return "ESXi 主机未配置远程 Syslog"
         return self._clean_customer_text(item.get("title", ""))
 
     def _normalize_alarm_item(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -1226,15 +1308,21 @@ class HtmlReportPackageBuilder:
         return f"{prefix}：" + "；".join(details)
 
     def _red_alarm_entries(self, item: dict[str, Any]) -> list[dict[str, Any]]:
-        entries: list[dict[str, Any]] = []
         for source in self._evidence_sources(item):
             for key in ("active_red_alarms", "red_alarms", "alarms", "alarm_details"):
                 value = source.get(key) if isinstance(source, dict) else None
                 if isinstance(value, list):
-                    entries.extend(entry for entry in value if isinstance(entry, dict))
+                    entries = [entry for entry in value if isinstance(entry, dict)]
                 elif isinstance(value, dict):
-                    entries.append(value)
-        return entries
+                    entries = [value]
+                else:
+                    continue
+                if entries:
+                    # observed_detail and raw_evidence are alternate snapshots of
+                    # the same finding, not additional alarms to add together.
+                    # Keep repetitions within the selected original list intact.
+                    return entries
+        return []
 
     def _normalize_syslog_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(item)
@@ -1369,21 +1457,6 @@ class HtmlReportPackageBuilder:
                 return self._clean_customer_text(value)
         return "未采集"
 
-    def _merged_tools_item(self, items: list[dict[str, Any]]) -> dict[str, Any]:
-        chosen = min(items, key=self._tools_priority)
-        base = dict(chosen)
-        base["title"] = "虚拟机未安装 VMware Tools"
-        base["summary"] = TOOLS_HTML_RECOMMENDATION
-        base["business_impact"] = TOOLS_HTML_RECOMMENDATION
-        base["consequence"] = TOOLS_HTML_RECOMMENDATION
-        base["remediation"] = TOOLS_HTML_RECOMMENDATION
-        base["recommended_action_zh"] = TOOLS_HTML_RECOMMENDATION
-        base["evidence_summary_zh"] = "当前发现该虚拟机 VMware Tools 状态需要安装或修复。"
-        base["observed_detail_zh"] = f"虚拟机名称：{self._clean_customer_text(base.get('object_name', '')) or '未采集'}；当前状态：{self._tools_status_text(chosen)}"
-        base["expected_detail_zh"] = ""
-        base["fault_detail_zh"] = base["observed_detail_zh"]
-        base["risk_level"] = self._risk_level_for_items(items)
-        return base
 
     def _tools_status_text(self, item: dict[str, Any]) -> str:
         text = self._item_text(item).casefold()
@@ -1435,7 +1508,7 @@ class HtmlReportPackageBuilder:
 
     def _is_snapshot_item(self, item: dict[str, Any]) -> bool:
         text = self._item_text(item)
-        return "快照" in text or "snapshot" in text.casefold()
+        return item.get("rule_id") in {"VSL-VM-001", "VSL-VM-007", "VSL-VM-022"}
 
     def _is_tools_item(self, item: dict[str, Any]) -> bool:
         rule_id = self._clean_customer_text(item.get("rule_id", "")).upper()
@@ -1722,7 +1795,15 @@ class HtmlReportPackageBuilder:
         }
 
     def _customer_finding(self, item: dict[str, Any]) -> dict[str, Any]:
+        if self._is_snapshot_item(item):
+            item = {**item, "observed_detail_zh": self._snapshot_observed_text(item.get("source_details") or [item])}
+        if self._is_red_alarm_item(item):
+            item = self._normalize_alarm_item(item)
         return {
+            "category_id": item.get("category_id", ""),
+            "category_priority": item.get("category_priority", ""),
+            "object_key": item.get("object_key") or (item.get("evidence") or {}).get("object_key"),
+            "grade_source_rule_id": item.get("grade_source_rule_id", ""),
             "snapshot_age_days_max": self._snapshot_age_days(item),
             "finding_id": item.get("finding_id", ""),
             "rule_id": item.get("rule_id", ""),
@@ -2079,6 +2160,21 @@ class HtmlReportPackageBuilder:
     def _html(self, data: dict[str, Any]) -> str:
         embedded = self._json_for_script(data)
         safe_title = escape(str(data.get("title") or "VStackLens 虚拟化巡检报告"))
+        product_view = data.get("productReport") or {}
+        has_vcenter = product_view.get("has_vcenter", True)
+        multiple_vcenters = bool(data.get("legacyReports"))
+        legacy_nav = ('<a href="#environment">环境</a><a href="#issues">问题</a>'
+                      '<a href="#passed">已通过的检查</a><a href="#inventory">环境清单</a>') if has_vcenter else ""
+        if multiple_vcenters:
+            legacy_nav = '<a href="#legacy-reports">VC／vSAN 专项</a>'
+        product_nav = '<a href="#products">产品专项</a>' if product_view else ""
+        legacy_sections = ('<section id="environment" class="report-section"></section>'
+                           '<section id="issues" class="report-section"></section>'
+                           '<section id="passed" class="report-section"></section>'
+                           '<section id="inventory" class="report-section"></section>') if has_vcenter else ""
+        if multiple_vcenters:
+            legacy_sections = '<section id="legacy-reports" class="report-section"></section>'
+        product_section = '<section id="products" class="report-section"></section>' if product_view else ""
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2096,18 +2192,14 @@ class HtmlReportPackageBuilder:
 
     <nav class="report-nav" aria-label="报告目录">
       <a href="#summary">总结</a>
-      <a href="#environment">环境</a>
-      <a href="#issues">问题</a>
-      <a href="#passed">已通过的检查</a>
-      <a href="#inventory">环境清单</a>
+      {legacy_nav}
+      {product_nav}
     </nav>
 
     <main class="report-content">
       <section id="summary" class="report-section"></section>
-      <section id="environment" class="report-section"></section>
-      <section id="issues" class="report-section"></section>
-      <section id="passed" class="report-section"></section>
-      <section id="inventory" class="report-section"></section>
+      {legacy_sections}
+      {product_section}
     </main>
   </div>
   <script id="report-data" type="application/json">{embedded}</script>
@@ -2299,6 +2391,9 @@ a:focus-visible,button:focus-visible,summary:focus-visible { outline:3px solid #
 .prior-comparison { margin:12px 0 0; padding-top:10px; border-top:1px solid #e3eaf0; }
 .summary-issues { display:grid; gap:4px; margin:15px 0 0; padding:0; list-style:none; }
 .summary-issues li { display:grid; grid-template-columns:30px minmax(0,1fr); gap:8px; padding:7px 0; border-top:1px solid #e3eaf0; }
+.check-limitations { margin:10px 0; padding-left:22px; color:var(--amber); }
+.report-content p,.report-content td,.report-content th,.report-content summary { overflow-wrap:anywhere; }
+thead { display:table-header-group; }
 .plain-line { margin:10px 0; }
 .cluster-block { margin-top:22px; padding-top:16px; border-top:1px solid var(--line); }
 .cluster-block > h3 { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-top:0; }
@@ -2360,9 +2455,15 @@ details { margin:9px 0; border:1px solid var(--line); border-radius:7px; backgro
 summary { padding:10px 12px; color:var(--blue); font-weight:700; cursor:pointer; }
 details > .table-scroll { padding:0 10px 6px; }
 .compact-table { max-width:560px; }
+.object-evidence-table th:first-child { width:55%; }
+.issue-evidence-table tr:not(.table-context) th:first-child { width:42%; }
+.issue-evidence-table tr:not(.table-context) th:nth-child(2) { width:23%; }
+.table-context th { background:#e8eef5; color:#23425c; }
+@page { size:A4 portrait; margin:16mm; }
+@media print { h2,h3,h4,summary { break-after:avoid; } table { font-size:10pt; } td,th { padding:5pt; line-height:1.45; } .summary-panel p,.problem-block p { font-size:11pt; line-height:1.5; } .problem-summary { font-size:9.5pt; } .object-evidence-table { font-size:10.5pt; } }
 @media (max-width:900px) { .shell { padding:16px; } .report-section { padding:17px; } .brand h1 { font-size:19px; } }
 @media (max-width:600px) { .shell { padding:10px; } .report-header { align-items:flex-start; } .brand h1 { font-size:17px; } .report-nav { gap:3px; padding:5px; } .report-nav a { min-height:34px; padding:6px 8px; font-size:13px; } .report-section { padding:14px 12px; } .report-section > h2 { font-size:20px; } table { min-width:640px; } .problem-summary { min-width:920px; } .cluster-facts { min-width:720px; } .environment-scale { min-width:640px; } .certificate-table { min-width:640px; } }
-@media print { body { background:#fff; } .shell { max-width:none; padding:0; } .report-header { padding:0 0 12px; } .report-nav,.print-button { display:none!important; } .report-content { display:block; } .report-section { margin:0 0 12px; padding:12px; border:0; border-radius:0; break-inside:auto; } .cluster-block,.problem-block,tr { break-inside:avoid; page-break-inside:avoid; } .table-scroll { overflow:visible; } details,details:not([open]) > :not(summary) { display:block!important; } details > summary { display:block!important; } a { color:inherit; text-decoration:none; } }
+@media print { body { background:#fff; font-size:10.5pt; } .shell { max-width:none; padding:0; } .report-header { padding:0 0 12px; } .report-nav,.print-button { display:none!important; } .report-content { display:block; } .report-section { margin:0 0 12px; padding:12px; border:0; border-radius:0; break-inside:auto; } .cluster-block,.problem-block { break-inside:auto; } tr { break-inside:avoid; page-break-inside:avoid; } .table-scroll { overflow:visible; } table { min-width:0!important; width:100%; table-layout:fixed; } th,td { overflow-wrap:anywhere; } thead { display:table-header-group; } details,details:not([open]) > :not(summary) { display:block!important; } details > summary { display:block!important; } a { color:inherit; text-decoration:none; } }
 """
 
     def _js(self) -> str:

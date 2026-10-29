@@ -38,7 +38,7 @@ def stage1_report():
             [{"object_key": "host-1", "object_name": "esxi01", "observed_value": 1, "judgement_text": "esxi01 存在物理网卡链路异常。"}],
         ),
         _category(
-            "VM-CDROM", "P2", "虚拟机挂载 ISO 镜像", "Virtual Machine",
+            "VM-CDROM", "P3", "虚拟机挂载 ISO 镜像", "Virtual Machine",
             [{"object_key": "vm-1", "object_name": "VM01", "object_type": "VirtualMachine", "object_path": "VC01 / DC01 / VM01"}],
             [{"object_key": "vm-1", "object_name": "VM01", "judgement_text": "VM01 当前存在 ISO 挂载。"}],
         ),
@@ -75,8 +75,8 @@ def test_stage1_view_model_sorts_engineering_order_and_keeps_customer_titles() -
     assert [item.title for item in model.risk_items] == [
         "集群 DRS 配置问题",
         "ESXi 主机物理网卡异常",
-        "虚拟机挂载 ISO 镜像",
         "虚拟机存在快照",
+        "虚拟机挂载 ISO 镜像",
     ]
     assert all(item.source_category_id for item in model.risk_items)
     assert model.vsan.applicable is True

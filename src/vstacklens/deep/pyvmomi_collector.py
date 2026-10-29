@@ -98,14 +98,26 @@ class PyVmomiDeepCollector:
         self._event_rule_ids_by_identity: dict[int, set[str]] = {}
         self.cancel_requested = cancel_requested or (lambda: False)
         self.host_log_credentials = list(host_log_credentials or [])
+        self._api_diagnostics: list[dict[str, Any]] = []
+
+    def _error_details(self, exc: Exception, context: str = "") -> dict[str, Any]:
+        from vstacklens.collection.diagnostics import exception_details
+        secrets = (self.username, self.password, *(item.password for item in self.host_log_credentials), *(item.username for item in self.host_log_credentials))
+        details = exception_details(exc, secrets=secrets, context=context)
+        self._api_diagnostics.append(details)
+        return details
 
     def collect(self, snapshot: StandardInventorySnapshot | None = None, policy: DeepCollectionPolicy | None = None) -> DeepDataset:
         policy = policy or DeepCollectionPolicy()
+        self._api_diagnostics = []
         resource_started = time.perf_counter()
         self._collection_started_at = resource_started
         resource_before = self._resource_snapshot()
         dataset_id = f"ds-real-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
         created_at = now_utc_iso()
+        from vstacklens.deep.analyzer import BUILTIN_DEEP_RULES
+        from vstacklens.deep.provenance import policy_snapshot
+        self._analysis_policy = policy_snapshot(BUILTIN_DEEP_RULES, default_threshold_registry())
         try:
             from pyVim.connect import Disconnect, SmartConnect
             from pyVmomi import vim
@@ -148,7 +160,12 @@ class PyVmomiDeepCollector:
             if stop_reason:
                 collection_log.append({"action": action, "status": "not_requested", "reason": stop_reason, "record_count": 0})
                 return []
-            phase_records = producer()
+            try:
+                phase_records = producer()
+            except Exception as exc:
+                details = self._error_details(exc, action)
+                collection_log.append({"action": action, "status": details["category"], "failure_details": details, "record_count": 0})
+                return []
             stop_reason = resource_guard()
             collection_log.append({"action": action, "status": "partial" if stop_reason else "ok", "reason": stop_reason, "record_count": len(phase_records)})
             return phase_records
@@ -326,6 +343,7 @@ class PyVmomiDeepCollector:
             }
             correlate_log_records(log_records, events, [*task_records, *perf_records, *enhanced_records], window_seconds=policy.correlation_window_seconds, object_id_aliases=host_object_aliases, event_rule_ids=self._event_rule_ids_by_identity)
             peak_resource = resource_monitor.stop()
+            collection_log.extend({"action": "api.error", "status": item["category"], "failure_details": item} for item in self._api_diagnostics)
             resource_log = self._resource_collection_log(resource_before, self._resource_snapshot(), time.perf_counter() - resource_started, policy, peak=peak_resource)
             collection_log.append(resource_log)
             degraded_actions = sum(1 for item in collection_log if item.get("status") in {"degraded", "partial", "not_requested", "skipped_budget", "skipped_resource_limit", "skipped_cancelled"} or str(item.get("status") or "").startswith("skipped_"))
@@ -342,7 +360,8 @@ class PyVmomiDeepCollector:
                 time_windows={"logs": {"requested_days": policy.log_collection_days}, "event": {"requested_days": policy.event_history_days}, "perf": {"requested_days": policy.history_days}},
                 anonymization={"enabled": False, "profile": "local_only", "map_location": "not_exported"},
                 impact={"profile": policy.impact_level, "budget_seconds": policy.budget_seconds, "degraded": session_degraded},
-                collection_status={"planned": len(records), "ok": len(records), "degraded": degraded_actions, "failed": 0},
+                collection_status={"planned": len(records), "ok": len(records), "degraded": degraded_actions, "failed": len(self._api_diagnostics)},
+                analysis_policy=self._analysis_policy,
             )
             return DeepDataset(
                 manifest=manifest,
@@ -370,11 +389,9 @@ class PyVmomiDeepCollector:
         failure_started: str,
         collection_log: list[dict[str, Any]] | None = None,
     ) -> DeepDataset:
-        error_name = type(error).__name__
-        lowered_name = error_name.casefold()
-        failure_status = classify_log_fault(error)
-        if failure_status == "error":
-            failure_status = "authentication_failed" if any(token in lowered_name for token in ("invalidlogin", "authentication")) else "connection_error"
+        details = self._error_details(error, failure_action)
+        error_name = details["error_type"]
+        failure_status = details["category"]
         finished = now_utc_iso()
         entity = self._environment_entity()
         log_records = normalize_powercli_logs(
@@ -427,7 +444,7 @@ class PyVmomiDeepCollector:
             "budget_limited_count": 0,
         }
         prior_log = list(collection_log or [])
-        prior_log.append({"action": failure_action, "status": failure_status, "source": "pyVim.connect.SmartConnect" if failure_action == "connection" else "ServiceInstance.RetrieveContent", "started_at": failure_started, "finished_at": finished, "error_type": error_name})
+        prior_log.append({"action": failure_action, "status": failure_status, "source": "pyVim.connect.SmartConnect" if failure_action == "connection" else "ServiceInstance.RetrieveContent", "started_at": failure_started, "finished_at": finished, "error_type": error_name, "failure_details": details})
         prior_log.extend([
             {"action": "inventory.view", "status": "not_requested", "reason": "vcenter_connection_unavailable", "counts": {"hosts": 0, "vms": 0, "clusters": 0, "datastores": 0}},
             {"action": "event.history", "status": "not_requested", "reason": "vcenter_connection_unavailable", "record_count": 0},
@@ -436,7 +453,7 @@ class PyVmomiDeepCollector:
         ])
         resource_peak = resource_monitor.stop()
         prior_log.append(self._resource_collection_log(resource_before, self._resource_snapshot(), time.perf_counter() - resource_started, policy, peak=resource_peak))
-        reason_detail = {"reason": failure_status, "error_type": error_name}
+        reason_detail = {"reason": failure_status, "error_type": error_name, "failure_details": details}
         capabilities = [
             Capability(id="inventory.current", name="当前清单与配置", status=CapabilityStatus.UNAVAILABLE, profile="core", detected_via="vCenter connection", detail=reason_detail),
             Capability(id="events.history", name="事件历史", status=CapabilityStatus.UNAVAILABLE, profile="core", detected_via="vCenter connection", detail=reason_detail),
@@ -467,6 +484,7 @@ class PyVmomiDeepCollector:
                 anonymization={"enabled": False, "profile": "local_only", "map_location": "not_exported"},
                 impact={"profile": policy.impact_level, "budget_seconds": policy.budget_seconds, "degraded": True},
                 collection_status={"planned": 2, "ok": 1, "degraded": max(1, degraded_actions), "failed": 1},
+                analysis_policy=getattr(self, "_analysis_policy", {}),
             ),
             capability=CapabilityMatrix(probed_at_utc=now_utc_iso(), capabilities=capabilities),
             records=log_records,
@@ -485,7 +503,7 @@ class PyVmomiDeepCollector:
             return {"status": "ok", "cpu_user_sec": float(cpu.user), "cpu_system_sec": float(cpu.system), "rss_bytes": int(process.memory_info().rss), "read_bytes": int(io.read_bytes), "write_bytes": int(io.write_bytes), "network_sent_bytes": int(network.bytes_sent) if network else 0, "network_recv_bytes": int(network.bytes_recv) if network else 0}
         except Exception as exc:  # noqa: BLE001 - resource metrics are optional evidence.
             if os.name != "nt":
-                return {"status": "unavailable", "reason": type(exc).__name__}
+                return {"status": "unavailable", "reason": self._error_details(exc)["error_type"]}
             try:
                 from ctypes import wintypes
 
@@ -525,7 +543,7 @@ class PyVmomiDeepCollector:
                 network_sent, network_recv = PyVmomiDeepCollector._windows_network_bytes() if include_network else (0, 0)
                 return {"status": "ok", "cpu_user_sec": _filetime(user), "cpu_system_sec": _filetime(kernel), "rss_bytes": int(memory.working_set_size), "read_bytes": int(io.read_bytes), "write_bytes": int(io.write_bytes), "network_sent_bytes": network_sent, "network_recv_bytes": network_recv, "source": "Windows native process APIs"}
             except Exception as native_exc:  # noqa: BLE001
-                return {"status": "unavailable", "reason": f"{type(exc).__name__}+{type(native_exc).__name__}"}
+                return {"status": "unavailable", "reason": f"{self._error_details(exc)['error_type']}+{self._error_details(native_exc)['error_type']}"}
 
     @staticmethod
     def _windows_network_bytes() -> tuple[int, int]:
@@ -596,7 +614,7 @@ class PyVmomiDeepCollector:
                     license_detail = {"license_count": len(list(getattr(license_manager, "licenses", []) or []))}
                     license_status = CapabilityStatus.AVAILABLE
                 except Exception as exc:  # noqa: BLE001 - permission is a capability result, not a session failure.
-                    license_detail = {"error": type(exc).__name__}
+                    license_detail = {"error": self._error_details(exc)["error_type"]}
         capabilities.append(Capability(id="lifecycle.license", name="许可证状态", status=license_status, profile="core", detected_via="LicenseManager.licenses", detail=license_detail))
         perf_manager = getattr(content, "perfManager", None)
         if perf_manager is None:
@@ -755,7 +773,7 @@ class PyVmomiDeepCollector:
             try:
                 devices, warnings = pci_collector._host_devices_with_warnings(host, collected_at)
             except Exception as exc:  # noqa: BLE001 - one host must not abort the deep run.
-                devices, warnings = [], [{"status": type(exc).__name__}]
+                devices, warnings = [], [{"status": self._error_details(exc)["error_type"]}]
             category_counts = {"disk": 0, "hba": 0, "nic": 0}
             for device in devices:
                 category = str(device.get("category") or "").casefold()
@@ -1021,7 +1039,7 @@ class PyVmomiDeepCollector:
                     finally:
                         catalog.close()
             except Exception as exc:  # noqa: BLE001 - HCL compatibility is an optional, independent capability.
-                catalog_error_type = type(exc).__name__
+                catalog_error_type = self._error_details(exc)["error_type"]
                 collection_status = "limited" if records else "unavailable"
 
         summary_value = {
@@ -1163,7 +1181,7 @@ class PyVmomiDeepCollector:
                 metrics = perf_manager.QueryAvailablePerfMetric(entity=entity, beginTime=datetime.now(UTC) - timedelta(days=1), endTime=datetime.now(UTC)) or []
                 summary["representative_objects"].append({"type": type(entity).__name__, "count": len(metrics)})
             except Exception as exc:  # noqa: BLE001 - capability probe records the failure.
-                summary["representative_objects"].append({"type": type(entity).__name__, "error": type(exc).__name__})
+                summary["representative_objects"].append({"type": type(entity).__name__, "error": self._error_details(exc)["error_type"]})
         return summary
 
     def _collect_daily_perf(self, content: Any, datastores: list[Any], dataset_id: str, collected_at: str, policy: DeepCollectionPolicy, *, resource_guard: Callable[[], str | None] | None = None) -> list[DatasetRecord]:
@@ -1175,7 +1193,8 @@ class PyVmomiDeepCollector:
         datastore = datastores[0]
         try:
             available = perf_manager.QueryAvailablePerfMetric(entity=datastore, beginTime=datetime.now(UTC) - timedelta(days=policy.history_days), endTime=datetime.now(UTC)) or []
-        except Exception:
+        except Exception as exc:
+            self._error_details(exc, "PerformanceManager.QueryAvailablePerfMetric")
             return []
         counter_ids = [item for item in available if str(getattr(item, "instance", "") or "") == ""]
         if not counter_ids:
@@ -1197,7 +1216,8 @@ class PyVmomiDeepCollector:
             metric = __import__("pyVmomi").vim.PerformanceManager.MetricId(counterId=int(item.counterId), instance="")
             spec = __import__("pyVmomi").vim.PerformanceManager.QuerySpec(entity=datastore, metricId=[metric], intervalId=86400, startTime=datetime.now(UTC) - timedelta(days=policy.history_days), endTime=datetime.now(UTC), format="normal")
             series = perf_manager.QueryPerf(querySpec=[spec]) or []
-        except Exception:
+        except Exception as exc:
+            self._error_details(exc, "PerformanceManager.QueryPerf")
             return []
         records: list[DatasetRecord] = []
         for result in series:
@@ -1529,7 +1549,7 @@ class PyVmomiDeepCollector:
                 self._event_query_meta = {"degraded": True, "fallback": "QueryEvents", "reason": type(collector_error).__name__, "window_start": begin.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "window_end": end.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "batches": 1, "collector_cap": policy.max_history_records}
                 return events
             except Exception as exc:
-                self._event_query_meta = {"degraded": True, "reason": type(exc).__name__, "window_start": begin.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "window_end": end.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "batches": 0, "collector_cap": policy.max_history_records}
+                self._event_query_meta = {"degraded": True, "reason": self._error_details(exc, "EventManager")["error_type"], "window_start": begin.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "window_end": end.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "batches": 0, "collector_cap": policy.max_history_records}
                 return []
             return []
 
@@ -1759,7 +1779,7 @@ class PyVmomiDeepCollector:
         try:
             results = list(checker(entities=entities, userName=username, privId=["Global.Diagnostics"]) or [])
         except Exception as exc:  # noqa: BLE001 - permission preflight must fall back to the bounded direct probes.
-            attempts.append({"source": "vim.AuthorizationManager.HasUserPrivilegeOnEntities", "scope": "vcenter+esxi_hosts", "started_at": started, "finished_at": now_utc_iso(), "status": "error", "error_type": type(exc).__name__})
+            attempts.append({"source": "vim.AuthorizationManager.HasUserPrivilegeOnEntities", "scope": "vcenter+esxi_hosts", "started_at": started, "finished_at": now_utc_iso(), "status": "error", "error_type": self._error_details(exc)["error_type"]})
             return None
         if len(results) != len(entities):
             attempts.append({"source": "vim.AuthorizationManager.HasUserPrivilegeOnEntities", "scope": "vcenter+esxi_hosts", "started_at": started, "finished_at": now_utc_iso(), "status": "incomplete", "entity_count": len(entities), "result_count": len(results)})
@@ -2184,7 +2204,7 @@ class PyVmomiDeepCollector:
                     for category in categories
                 ]
                 direct_records.extend(normalize_powercli_logs(dataset_id=dataset_id, entity=entity, collected_at=collected_at, payloads=payloads, max_file_bytes=max_file_bytes, byte_budget=byte_budget))
-                attempts.append({"source": "vim.DiagnosticManager.DirectESXi", "scope": attempt_scope, "started_at": started, "finished_at": now_utc_iso(), "status": status, "error_type": type(exc).__name__, **({"missing_privilege_id": privilege_id} if privilege_id else {})})
+                attempts.append({"source": "vim.DiagnosticManager.DirectESXi", "scope": attempt_scope, "started_at": started, "finished_at": now_utc_iso(), "status": status, "error_type": self._error_details(exc)["error_type"], **({"missing_privilege_id": privilege_id} if privilege_id else {})})
             finally:
                 if direct_si is not None:
                     try:
@@ -2249,7 +2269,7 @@ class PyVmomiDeepCollector:
                 page = manager.BrowseDiagnosticLog(**kwargs)
             except Exception as exc:  # noqa: BLE001 - preserve the API fault class without serializing its raw text.
                 error_status = classify_log_fault(exc)
-                error_type = type(exc).__name__
+                error_type = self._error_details(exc)["error_type"]
                 missing_privilege_id = str(getattr(exc, "privilegeId", "") or "").strip() or None
                 break
 
@@ -2466,7 +2486,7 @@ class PyVmomiDeepCollector:
                 }
         except Exception as exc:  # noqa: BLE001 - a failed tail locator must not trigger a full-file download.
             error_status = classify_log_fault(exc)
-            error_type = type(exc).__name__
+            error_type = self._error_details(exc)["error_type"]
             missing_privilege_id = str(getattr(exc, "privilegeId", "") or "").strip() or None
             return {
                 "status": error_status, "reason": "time_seek_locator_failed", "error_type": error_type,
@@ -2536,7 +2556,7 @@ class PyVmomiDeepCollector:
                 page = call_browse(requested_start, requested_lines)
             except Exception as exc:  # noqa: BLE001 - preserve status but never fall back to a full file read.
                 error_status = classify_log_fault(exc)
-                error_type = type(exc).__name__
+                error_type = self._error_details(exc)["error_type"]
                 missing_privilege_id = str(getattr(exc, "privilegeId", "") or "").strip() or None
                 truncation_reasons.add(error_status)
                 time_window_status = "read_failed"
@@ -3250,7 +3270,7 @@ class PyVmomiDeepCollector:
                     "targets": [],
                     "expected_host_count": max(1, len(getattr(compute, "host", []) or [])) if compute else 1,
                     "unqueried_host_count": 1,
-                    "error_type": type(exc).__name__,
+                    "error_type": self._error_details(exc)["error_type"],
                 }
             resource_scopes[compute_id] = scope
             return compute_id
@@ -3293,7 +3313,7 @@ class PyVmomiDeepCollector:
                     if browser is None and host is not None:
                         browser = getattr(getattr(host, "parent", None), "environmentBrowser", None)
                 except Exception as exc:  # noqa: BLE001 - cache scoped ManagedObject property failures as well as method faults.
-                    result = {"status": "error", "reason": None, "error_type": type(exc).__name__, "descriptors": {}}
+                    result = {"status": "error", "reason": None, "error_type": self._error_details(exc)["error_type"], "descriptors": {}}
                     cache[key] = result
                     return result
                 browser_cache[browser_key] = browser
@@ -3323,7 +3343,7 @@ class PyVmomiDeepCollector:
                     "source": "vim.EnvironmentBrowser.QueryConfigOption",
                 }
             except Exception as exc:  # noqa: BLE001 - keep host/API failures scoped to this capability.
-                result = {"status": "error", "reason": None, "error_type": type(exc).__name__, "descriptors": {}}
+                result = {"status": "error", "reason": None, "error_type": self._error_details(exc)["error_type"], "descriptors": {}}
             cache[key] = result
             return result
 
@@ -3716,7 +3736,7 @@ class PyVmomiDeepCollector:
             try:
                 return getattr(obj, name, None), True, None
             except Exception as exc:  # noqa: BLE001 - isolate a property fault to this part of the tree.
-                return None, False, type(exc).__name__
+                return None, False, self._error_details(exc)["error_type"]
 
         def token(value: Any) -> str:
             if value is None:
@@ -4017,7 +4037,7 @@ class PyVmomiDeepCollector:
             try:
                 return getattr(obj, name, None), True, None
             except Exception as exc:  # noqa: BLE001 - one missing mount field must not discard other Datastores.
-                return None, False, type(exc).__name__
+                return None, False, self._error_details(exc)["error_type"]
 
         def safe_reason(value: Any) -> str | None:
             token = re.sub(r"[^a-z0-9]", "", str(value or "").casefold().rsplit(".", 1)[-1])
@@ -4784,7 +4804,7 @@ class PyVmomiDeepCollector:
                 "time_range": {"start": str(time_range.startTime), "end": str(time_range.endTime)},
             }
         except Exception as exc:  # noqa: BLE001 - performance service is optional.
-            return {"status": "unavailable", "reason": type(exc).__name__, "supported_metrics": [], "sample_counts": {}}
+            return {"status": "unavailable", "reason": self._error_details(exc)["error_type"], "supported_metrics": [], "sample_counts": {}}
 
     def _vsan_performance_records(self, clusters: list[Any], dataset_id: str, collected_at: str, performance: dict[str, Any]) -> list[DatasetRecord]:
         summaries = performance.get("records") or []
@@ -5016,7 +5036,7 @@ class PyVmomiDeepCollector:
             finally:
                 view.Destroy()
         except Exception as exc:  # noqa: BLE001 - preserve an explicit read-only capability state.
-            return {"status": "unavailable", "reason": type(exc).__name__, "switch_count": 0, "portgroup_count": 0, "switches": [], "portgroups": []}
+            return {"status": "unavailable", "reason": self._error_details(exc)["error_type"], "switch_count": 0, "portgroup_count": 0, "switches": [], "portgroups": []}
 
         switch_by_moid: dict[str, dict[str, Any]] = {}
         switches: list[dict[str, Any]] = []
@@ -5299,7 +5319,7 @@ class PyVmomiDeepCollector:
                     collection_status = "empty"
         except Exception as exc:  # noqa: BLE001 - license access is a scoped capability result.
             collection_status = "unavailable"
-            error_type = type(exc).__name__
+            error_type = self._error_details(exc, "LicenseManager.licenses")["error_type"]
 
         expiry_window_days = int(default_threshold_registry().get("TH-LIFECYCLE-EXPIRY-WINDOW").value)
         license_items: list[dict[str, Any]] = []
@@ -5424,11 +5444,13 @@ class PyVmomiDeepCollector:
             timeout=30,
         )
         try:
-            return collector.collect_vsan_management_inventory(service_instance, clusters, vms)
+            result = collector.collect_vsan_management_inventory(service_instance, clusters, vms)
+            self._api_diagnostics.extend(result.get("api_diagnostics") or [])
+            return result
         except Exception as exc:  # noqa: BLE001 - a vSAN API failure is a capability result.
             return {
                 "status": "error",
-                "collection_error": type(exc).__name__,
+                "collection_error": self._error_details(exc, "vSAN management API")["error_type"],
                 "clusters": {},
             }
 

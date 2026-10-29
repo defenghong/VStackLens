@@ -60,7 +60,7 @@ def extension_rule_ids() -> set[str]:
     return {raw["rule_id"] for raw in raw_rules if raw["rule_id"] not in executable_ids}
 
 
-def run_fixture(db_path: Path, fixture: Path, out_path: Path, previous_run_id: str | None = None) -> str:
+def run_fixture(db_path: Path, fixture: Path, out_path: Path, previous_run_id: str | None = None, *, license_profile: str | None = None) -> str:
     init_db(db_path)
     rules = load_rules()
     executable_rules = load_executable_rules()
@@ -71,6 +71,12 @@ def run_fixture(db_path: Path, fixture: Path, out_path: Path, previous_run_id: s
         run = RunContext(run_id=run_id, customer_id=customer_id, site_id=site_id, vcenter_id=vcenter_id, db_path=db_path)
         update_run(conn, run_id, "running", "collecting", 20)
         raw = MockCollector(fixture).collect(run, plan)
+        from tests.license_sdk_evidence import with_declared_license_sources
+        declared = license_profile or {
+            FIXTURES / "inventory_pass.json": "pass", FIXTURES / "inventory_fail.json": "fail",
+        }.get(fixture)
+        if declared is not None:
+            raw = with_declared_license_sources(raw, declared)
         inventory = InventoryNormalizer().normalize(raw)
         SnapshotEngine().write_snapshot(conn, run, inventory)
         for rule in rules:
@@ -227,7 +233,7 @@ def test_mock_pipeline_persists_summary_report_and_findings(tmp_path: Path) -> N
         assert run["run_status"] == "success"
         assert run["current_stage"] == "success"
         assert run["score"] == 15
-        assert json.loads(run["risk_summary_json"]) == {"P1": 9, "P2": 11, "P3": 18, "P4": 19}
+        assert json.loads(run["risk_summary_json"]) == {"P1": 8, "P2": 14, "P3": 16, "P4": 19}
         assert scalar(conn, "SELECT COUNT(*) FROM reports WHERE run_id = ?", (run_id,)) == 2
         report_types = {
             row["report_type"]
@@ -271,9 +277,9 @@ def test_finding_exception_is_recorded_and_excluded_from_score(tmp_path: Path) -
         context = ReportContextBuilder().build(conn, run_id)
 
     assert before["score"] == 15
-    assert json.loads(before["risk_summary_json"]) == {"P1": 9, "P2": 11, "P3": 18, "P4": 19}
+    assert json.loads(before["risk_summary_json"]) == {"P1": 8, "P2": 14, "P3": 16, "P4": 19}
     assert after["score"] == 15
-    assert json.loads(after["risk_summary_json"]) == {"P1": 8, "P2": 11, "P3": 18, "P4": 19}
+    assert json.loads(after["risk_summary_json"]) == {"P1": 7, "P2": 14, "P3": 16, "P4": 19}
     assert exception["exception_reason"] == "专用隔离集群，客户确认不要求在线迁移。"
     assert exception["owner"] == "virtualization_admin"
     assert len(context["exception_findings"]) == 1
@@ -323,7 +329,7 @@ def test_failed_finding_resolves_when_same_object_passes(tmp_path: Path) -> None
 
     db_path = tmp_path / "lifecycle.db"
     run_fixture(db_path, FIXTURES / "inventory_fail.json", tmp_path / "fail.html")
-    run_fixture(db_path, pass_all, tmp_path / "pass.html")
+    run_fixture(db_path, pass_all, tmp_path / "pass.html", license_profile="pass")
 
     with connect(db_path) as conn:
         assert scalar(conn, "SELECT COUNT(*) FROM findings WHERE status = 'open'") == 0
@@ -374,9 +380,9 @@ def test_run_comparison_tracks_new_existing_resolved_and_reopened(tmp_path: Path
     mixed_fixture.write_text(json.dumps(mixed_inventory), encoding="utf-8")
 
     run1 = run_fixture(db_path, fail_fixture, tmp_path / "run1.html")
-    run2 = run_fixture(db_path, pass_all, tmp_path / "run2.html", previous_run_id=run1)
-    run3 = run_fixture(db_path, mixed_fixture, tmp_path / "run3.html", previous_run_id=run2)
-    run4 = run_fixture(db_path, mixed_fixture, tmp_path / "run4.html", previous_run_id=run3)
+    run2 = run_fixture(db_path, pass_all, tmp_path / "run2.html", previous_run_id=run1, license_profile="pass")
+    run3 = run_fixture(db_path, mixed_fixture, tmp_path / "run3.html", previous_run_id=run2, license_profile="pass")
+    run4 = run_fixture(db_path, mixed_fixture, tmp_path / "run4.html", previous_run_id=run3, license_profile="pass")
 
     with connect(db_path) as conn:
         comparison_1_2 = RunComparisonBuilder().build(conn, run1, run2)
@@ -457,7 +463,11 @@ def test_compare_runs_cli_generates_report_package_with_tracking_section(tmp_pat
     assert "与上轮巡检相比" in index
     assert "历史对比" not in index
     assert "整改跟踪" not in index
-    assert all(f'id="{section}"' in index for section in ("summary", "environment", "issues", "passed", "inventory"))
+    assert all(f'id="{section}"' in index for section in ("opening", "body-sections", "appendices"))
+    document = payload["document"]
+    assert [section["kind"] for section in document["sections"]] == sorted(
+        [section["kind"] for section in document["sections"]],
+        key=("overview", "problems", "checklist", "environment").index)
     assert not (report_dir / "data" / "report_context.json").exists()
     assert not (report_dir / "data" / "run_comparison.json").exists()
     assert comparison["summary"]["resolved"] > 0
@@ -478,7 +488,7 @@ def test_promoted_rules_have_pass_fail_and_missing_data_semantics(tmp_path: Path
     for field in ("invalid_network_count", "orphaned_or_inaccessible", "passthrough_device_count"):
         vm["properties"].pop(field, None)
     missing_m2b1_fixture.write_text(json.dumps(missing_m2b1), encoding="utf-8")
-    missing_m2b1_run = run_fixture(tmp_path / "missing-m2b1.db", missing_m2b1_fixture, tmp_path / "missing-m2b1.html")
+    missing_m2b1_run = run_fixture(tmp_path / "missing-m2b1.db", missing_m2b1_fixture, tmp_path / "missing-m2b1.html", license_profile="pass")
 
     with connect(tmp_path / "pass.db") as conn:
         statuses = {
@@ -556,7 +566,7 @@ def test_m2e_backfilled_rules_have_pass_fail_and_missing_data_semantics(tmp_path
         ):
             props.pop(field, None)
     missing_fixture.write_text(json.dumps(missing_inventory), encoding="utf-8")
-    missing_run = run_fixture(tmp_path / "m2e-missing.db", missing_fixture, tmp_path / "m2e-missing.html")
+    missing_run = run_fixture(tmp_path / "m2e-missing.db", missing_fixture, tmp_path / "m2e-missing.html", license_profile="pass")
 
     with connect(tmp_path / "m2e-pass.db") as conn:
         statuses = {
@@ -611,7 +621,7 @@ def test_m2e2_backfilled_rules_have_real_semantics_and_customer_values(tmp_path:
         ):
             props.pop(field, None)
     missing_fixture.write_text(json.dumps(missing_inventory), encoding="utf-8")
-    missing_run = run_fixture(tmp_path / "m2e2-missing.db", missing_fixture, tmp_path / "m2e2-missing.html")
+    missing_run = run_fixture(tmp_path / "m2e2-missing.db", missing_fixture, tmp_path / "m2e2-missing.html", license_profile="pass")
 
     with connect(tmp_path / "m2e2-pass.db") as conn:
         statuses = {
@@ -625,7 +635,11 @@ def test_m2e2_backfilled_rules_have_real_semantics_and_customer_values(tmp_path:
         assert set(statuses.values()) == {"passed"}
         context = ReportContextBuilder().build(conn, pass_run)
         host_license = next(item for item in context["object_results"] if item["rule_id"] == "VSL-HOST-023")
-        assert host_license["current_value_zh"] == "永久授权"
+        assert host_license["current_value_zh"].startswith("永久授权")
+        state = host_license["observed_detail"]["host_license_evidence"]
+        assert state["entity_id"] == "host-1" and state["assigned"] is True
+        assert state["expiration_state"] == "perpetual"
+        assert state["perpetual_evidence"][0]["value"] == "Never"
         assert "critical_pass_summary" not in context
 
     with connect(tmp_path / "m2e2-fail.db") as conn:
@@ -763,7 +777,6 @@ def test_run_vcenter_connection_failure_creates_vcenter_connection_finding(monke
 def test_pyvmomi_mapper_does_not_fake_alarm_or_performance_values(monkeypatch) -> None:
     collector = PyVmomiCollector("vc.local", "user", "pass")
     monkeypatch.setattr(collector, "_certificate_days_remaining", lambda: 365)
-    monkeypatch.setattr(collector, "_license_days_remaining", lambda content: 999999)
 
     class State:
         overallStatus = "red"
@@ -790,7 +803,10 @@ def test_pyvmomi_mapper_does_not_fake_alarm_or_performance_values(monkeypatch) -
     assert vcenter["properties"]["version"] == "8.0.3"
     assert vcenter["properties"]["build"] == "24091160"
     assert vcenter["properties"]["certificate_days_remaining"] == 365
-    assert vcenter["properties"]["license_days_remaining"] == 999999
+    assert vcenter["properties"]["license_days_remaining"] is None
+    assert vcenter["properties"]["license_assigned"] is None
+    assert vcenter["properties"]["license_expiration_state"] == "unknown"
+    assert vcenter["properties"]["license_evidence"]["query_status"] == "unavailable"
 
     class Runtime:
         connectionState = "connected"
@@ -884,7 +900,7 @@ def test_host_certificate_fallback_reads_esxi_443_tls_without_esxi_login(monkeyp
             "notAfter": "Jun 04 12:00:00 2099 GMT",
             "subject": ((("commonName", "esxi-01.lab.local"),),),
             "issuer": ((("commonName", "VMware VMCA"),),),
-            "subjectAltName": (("DNS", "esxi-01.lab.local"), ("IP Address", "192.168.10.21")),
+            "subjectAltName": (("DNS", "esxi-01.lab.local"), ("IP Address", "192.0.2.21")),
         },
     )
 
@@ -899,7 +915,7 @@ def test_host_certificate_fallback_reads_esxi_443_tls_without_esxi_login(monkeyp
     assert result["not_after"] == "2099-06-04"
     assert result["subject"] == "commonName=esxi-01.lab.local"
     assert result["issuer"] == "commonName=VMware VMCA"
-    assert result["san"] == ["DNS:esxi-01.lab.local", "IP Address:192.168.10.21"]
+    assert result["san"] == ["DNS:esxi-01.lab.local", "IP Address:192.0.2.21"]
     assert result["fingerprint"] == "75:06:59:7B:E1:DB:03:10:B0:72:D9:06:67:14:31:56:6D:CD:17:79:F3:59:B6:72:C7:BD:A3:D6:D9:E7:84:FF"
     assert result["probe_method"] == "ESXi 443 TLS 证书探测"
 

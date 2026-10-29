@@ -218,6 +218,7 @@ class DatasetManifest(BaseModel):
     impact: dict[str, Any] = Field(default_factory=dict)
     integrity: dict[str, Any] = Field(default_factory=dict)
     collection_status: dict[str, int] = Field(default_factory=dict)
+    analysis_policy: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeepDataset(BaseModel):
@@ -299,6 +300,13 @@ class DeepFinding(BaseModel):
         return self
 
 
+class DeepObjectEvaluation(BaseModel):
+    scope: FindingScope
+    status: DeepResultStatus
+    reason: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
 class DeepRuleResult(BaseModel):
     rule_id: str
     rule_version: str
@@ -309,7 +317,10 @@ class DeepRuleResult(BaseModel):
     missing_capabilities: list[str] = Field(default_factory=list)
     reason: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
+    derived_evidence: list[EvidenceReference] = Field(default_factory=list)
     evaluated_at_utc: str
+    object_results: list[DeepObjectEvaluation] = Field(default_factory=list)
+    failure_details: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeepAnalysisScope(BaseModel):
@@ -329,6 +340,7 @@ class DeepReport(BaseModel):
     trend_chain_verified: bool = False
     trend_summary: dict[str, Any] = Field(default_factory=dict)
     trend_summaries: dict[str, Any] = Field(default_factory=dict)
+    analysis_provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeepDiagnosticRecord(BaseModel):
@@ -341,6 +353,9 @@ class DeepDiagnosticRecord(BaseModel):
     errors: list[dict[str, Any]] = Field(default_factory=list)
     impact: dict[str, Any] = Field(default_factory=dict)
     integrity: dict[str, Any] = Field(default_factory=dict)
+    model_analysis: dict[str, Any] = Field(default_factory=dict)
+    finding_lifecycle_history: dict[str, Any] = Field(default_factory=dict)
+    analysis_provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 def now_utc_iso() -> str:
@@ -397,6 +412,7 @@ def evidence_ref(record: DatasetRecord, *, derivation: list[str] | None = None) 
             "event_type",
             "event_key",
             "event_source_api",
+            "dataset_pointer_validation",
             "entity",
             "host",
             "matched_object_id",
@@ -407,6 +423,7 @@ def evidence_ref(record: DatasetRecord, *, derivation: list[str] | None = None) 
             "log_timestamp",
             "log_line_index",
             "source_line_number",
+            "source_line_number_validation",
             "time_distance_seconds",
             "matching_categories",
             "interfaces",

@@ -48,6 +48,12 @@ class RuleExecutor:
                 status = RuleResultStatus.NOT_APPLICABLE
                 risk_level = None
                 data_quality = DataQuality.COMPLETE
+            elif self._confirmed_unassigned_license(rule, target):
+                # The existing HOST-023 predicate and first severity clause are
+                # already conclusive for a verified unassigned host. Expiry is
+                # inapplicable; preserve None rather than inventing zero days.
+                status = RuleResultStatus.FAILED
+                risk_level = self.severity.resolve(rule, ctx).value
             elif data_quality in {DataQuality.MISSING, DataQuality.PERMISSION_DENIED, DataQuality.API_ERROR, DataQuality.UNSUPPORTED_VERSION}:
                 status = RuleResultStatus.UNAVAILABLE
                 risk_level = None
@@ -121,6 +127,14 @@ class RuleExecutor:
             "evaluated_at": now,
             "created_at": now,
         }
+
+    @staticmethod
+    def _confirmed_unassigned_license(rule: RuleDefinition, target: CanonicalObject) -> bool:
+        if rule.rule_id != "VSL-HOST-023":
+            return False
+        from vstacklens.collection.license_state import verified_state
+        state = verified_state(target.properties, True, target.object_key)
+        return state.get("query_status") == "success" and state.get("assignment_status") == "unassigned" and state.get("assigned") is False
 
     def _resolve_current_value(self, rule: RuleDefinition, target: CanonicalObject) -> Any:
         path = rule.evidence_schema.get("current_value_path")

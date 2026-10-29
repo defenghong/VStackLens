@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import json
 import ssl
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from vstacklens.collection.mock_collector import MockCollector
 from vstacklens.collection.planner import CollectionPlanner
 from vstacklens.collection.pyvmomi_collector import PyVmomiCollector
 from vstacklens.core.context import RunContext
+from vstacklens.core.time import utc_now_iso
 from vstacklens.db.connection import connect, init_db
 from vstacklens.db.repositories import (
     ensure_default_scope,
@@ -33,7 +35,7 @@ from vstacklens.db.repositories import (
 from vstacklens.findings.deduplication import FindingDeduplicator
 from vstacklens.inventory.normalizer import InventoryNormalizer
 from vstacklens.inventory.snapshot_engine import SnapshotEngine
-from vstacklens.application.artifact_safety import scan_artifacts
+from vstacklens.application.artifact_safety import ArtifactScanFinding, scan_artifacts
 from vstacklens.application.engineering_diagnostics import write_engineering_diagnostics
 from vstacklens.reports.context_builder import ReportContextBuilder
 from vstacklens.reports.exporter import ReportExportEngine
@@ -80,15 +82,19 @@ class InspectionRunRequest:
     html_out: Path | None = None
     docx_out: Path | None = None
     pdf_out: Path | None = None
+    environment_id: str | None = None
 
 
 @dataclass(slots=True)
 class VCenterRunRequest(InspectionRunRequest):
     vcenter: str = ""
     username: str = ""
-    password: str = ""
+    password: str = field(default="", repr=False)
     port: int = 443
     ssl_no_verify: bool = False
+    execution_owner: str | None = None
+    identity_validator: Callable[[str], None] | None = field(default=None, repr=False)
+    known_secrets: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(slots=True)
@@ -108,12 +114,14 @@ class RunnerResult:
     pdf_path: Path | None = None
     pdf_error: str | None = None
     html_error: str | None = None
+    delivery_error: str | None = None
 
 
-CERTIFICATE_DOWNGRADE_WARNING = "vCenter 证书未通过可信链校验，本次巡检已在不校验证书模式下继续完成。建议后续为 vCenter 配置受信任证书，以提升连接安全性。"
 
 
 class InspectionRunner:
+    def __init__(self, *, collector_factory=None):
+        self.collector_factory = collector_factory
     def load_registry(self, rulepack: Path) -> RuleRegistry:
         loader = RulePackLoader()
         validator = SchemaValidator()
@@ -183,6 +191,7 @@ class InspectionRunner:
                 request.vcenter,
                 customer_name=request.customer_name,
                 site_name=request.site_name,
+                environment_id=request.environment_id,
             )
             run_id = insert_run(conn, customer_id, site_id, vcenter_id, "manual")
             run = RunContext(run_id=run_id, customer_id=customer_id, site_id=site_id, vcenter_id=vcenter_id, db_path=db)
@@ -222,6 +231,25 @@ class InspectionRunner:
         progress: ProgressCallback | None = None,
         cancel_requested: CancelCallback | None = None,
     ) -> RunnerResult:
+        from vstacklens.application.execution_guard import execution_lease
+        endpoint = normalize_vcenter_address(request.vcenter, request.port)
+        def pipeline_progress(stage: str, percent: int) -> None:
+            if progress and stage not in {"success", "delivery_failed"}:
+                progress(stage, percent)
+        with execution_lease(request.db_path, request.environment_id, endpoint.host, endpoint.port, request.execution_owner):
+            result = self._run_vcenter_impl(request, pipeline_progress if progress else None, cancel_requested)
+        # Emit completion only after the transaction and execution lease have closed.
+        if progress:
+            stage = "delivery_failed" if any((result.html_error, result.docx_error, result.pdf_error, result.delivery_error)) else "success"
+            progress(stage, 100)
+        return result
+
+    def _run_vcenter_impl(
+        self,
+        request: VCenterRunRequest,
+        progress: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
+    ) -> RunnerResult:
         db = Path(request.db_path)
         init_db(db)
         registry = self.load_registry(Path(request.rulepack_path))
@@ -234,6 +262,8 @@ class InspectionRunner:
                 request.username,
                 customer_name=request.customer_name,
                 site_name=request.site_name,
+                environment_id=request.environment_id,
+                port=endpoint.port,
             )
             run_id = insert_run(conn, customer_id, site_id, vcenter_id, "manual")
             run = RunContext(run_id=run_id, customer_id=customer_id, site_id=site_id, vcenter_id=vcenter_id, db_path=db)
@@ -247,86 +277,40 @@ class InspectionRunner:
                 self._set_stage(conn, run_id, "planning_collection", 15, progress, cancel_requested)
                 self._set_stage(conn, run_id, "prechecking", 18, progress, cancel_requested)
                 port_probe = ProbeResult("skipped", "SDK 连接检测已启动，端口检测将在失败诊断时执行。")
-                collector = PyVmomiCollector(
+                collector = (self.collector_factory or PyVmomiCollector)(
                     endpoint.host,
                     request.username,
                     request.password,
                     endpoint.port,
                     not request.ssl_no_verify,
                 )
+                if request.identity_validator:
+                    collector.identity_validator = request.identity_validator
                 security_warnings: list[str] = []
                 try:
                     self._raise_if_cancelled(conn, run_id, progress, cancel_requested)
                     collector.precheck()
                 except Exception as exc:  # noqa: BLE001 - connection failure remains a customer report finding.
-                    if not request.ssl_no_verify and self._is_certificate_verification_error(exc):
-                        retry_collector = PyVmomiCollector(
-                            endpoint.host,
-                            request.username,
-                            request.password,
-                            endpoint.port,
-                            False,
-                        )
-                        try:
-                            retry_collector.precheck()
-                        except Exception as retry_exc:  # noqa: BLE001 - retry failure becomes a connection diagnostic.
-                            raw, executable_rules = self._connection_failure_after_sdk_failure(
-                                request,
-                                registry,
-                                endpoint.host,
-                                endpoint.port,
-                                port_probe,
-                                retry_exc,
-                            )
-                            previous_run_id = self.previous_run_for_args(conn, request.previous_run_id, request.compare_latest, run_id)
-                            return self.run_pipeline(
-                                conn,
-                                db,
-                                run,
-                                site_id,
-                                raw,
-                                executable_rules,
-                                registry.rules,
-                                self._run_paths(request, run_id),
-                                report_title=request.report_title,
-                                zip_report=request.zip_report,
-                                previous_run_id=previous_run_id,
-                                progress=progress,
-                                cancel_requested=cancel_requested,
-                                secrets=(request.password,),
-                            )
-                        collector = retry_collector
-                        security_warnings.append(CERTIFICATE_DOWNGRADE_WARNING)
-                    else:
-                        raw, executable_rules = self._connection_failure_after_sdk_failure(
-                            request,
-                            registry,
-                            endpoint.host,
-                            endpoint.port,
-                            port_probe,
-                            exc,
-                        )
-                        previous_run_id = self.previous_run_for_args(conn, request.previous_run_id, request.compare_latest, run_id)
-                        return self.run_pipeline(
-                            conn,
-                            db,
-                            run,
-                            site_id,
-                            raw,
-                            executable_rules,
-                            registry.rules,
-                            self._run_paths(request, run_id),
-                            report_title=request.report_title,
-                            zip_report=request.zip_report,
-                            previous_run_id=previous_run_id,
-                            progress=progress,
-                            cancel_requested=cancel_requested,
-                            secrets=(request.password,),
-                        )
+                    from vstacklens.application.execution_guard import TargetIdentityError
+                    if isinstance(exc, (TargetIdentityError, RunnerCancelledError)):
+                        raise
+                    raw, executable_rules = self._connection_failure_after_sdk_failure(
+                        request, registry, endpoint.host, endpoint.port, port_probe, exc,
+                    )
+                    previous_run_id = self.previous_run_for_args(conn, request.previous_run_id, request.compare_latest, run_id)
+                    return self.run_pipeline(
+                        conn, db, run, site_id, raw, executable_rules, registry.rules,
+                        self._run_paths(request, run_id), report_title=request.report_title,
+                        zip_report=request.zip_report, previous_run_id=previous_run_id,
+                        progress=progress, cancel_requested=cancel_requested, secrets=(request.password, *request.known_secrets),
+                    )
                 self._set_stage(conn, run_id, "collecting_environment", 20, progress, cancel_requested)
-                if isinstance(collector, PyVmomiCollector):
+                if hasattr(collector, "cancel_requested"):
                     collector.cancel_requested = cancel_requested or (lambda: False)
                 raw = self._collect_with_progress(collector, run, plan, progress)
+                if request.identity_validator:
+                    centers = [obj for obj in raw.get("objects", []) if obj.get("object_type") == "vCenter"]
+                    request.identity_validator(str(centers[0].get("object_key") or "") if len(centers) == 1 else "")
                 self._raise_if_cancelled(conn, run_id, progress, cancel_requested)
                 raw = merge_vcenter_diagnostics(
                     raw,
@@ -352,12 +336,19 @@ class InspectionRunner:
                     previous_run_id=previous_run_id,
                     progress=progress,
                     cancel_requested=cancel_requested,
-                    secrets=(request.password,),
+                    secrets=(request.password, *request.known_secrets),
                 )
-            except RunnerCancelledError:
+            except RunnerCancelledError as exc:
+                percent_row = conn.execute("SELECT progress_percent FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone()
+                update_run(conn, run_id, "cancelled", "cancelled", min(int(percent_row[0] or 0), 99), str(exc))
+                conn.execute("UPDATE reports SET report_status = 'cancelled', generated_at = NULL, error_message = ? WHERE run_id = ? AND report_status = 'success'", ("任务已取消，未完成交付确认。", run_id))
+                conn.commit()
                 raise
             except Exception as exc:
-                update_run(conn, run_id, "failed", stage, 100, str(exc)[:1000])
+                state = "cancelled" if isinstance(exc, RunnerCancelledError) else "failed"
+                update_run(conn, run_id, state, stage, 100, redact_sensitive(exc, request.password, *request.known_secrets)[:1000])
+                conn.execute("UPDATE reports SET report_status = 'failed', generated_at = NULL, error_message = ? WHERE run_id = ? AND report_status = 'success'", ("任务异常结束，未完成交付确认。", run_id))
+                conn.commit()  # Preserve the attempted task; failed runs are not trusted completed inspections.
                 if progress:
                     progress("failed", 100)
                 raise
@@ -376,6 +367,8 @@ class InspectionRunner:
         sdk_probe = ProbeResult("failed", friendly_connection_error(sdk_error), redact_sensitive(sdk_error, request.password))
         diagnostics = diagnostic_properties(mode="connection_failed", port=port_probe, sdk=sdk_probe)
         raw = self.connection_failure_inventory(vcenter_host, sdk_probe.message, diagnostics)
+        from vstacklens.collection.diagnostics import exception_details
+        raw["collection_diagnostics"] = [exception_details(sdk_error, secrets=(request.password, request.username), context="vCenter SDK precheck")]
         connection_rule = [rule for rule in registry.rules if rule.rule_id == "VSL-VC-001"]
         return raw, connection_rule
 
@@ -402,6 +395,8 @@ class InspectionRunner:
         cancel_requested: CancelCallback | None = None,
         secrets: tuple[str, ...] = (),
     ) -> RunnerResult:
+        if secrets:
+            raw = self._redact_inventory(raw, secrets)
         self._set_stage(conn, run.run_id, "normalizing", 60, progress, cancel_requested)
         inventory = InventoryNormalizer().normalize(raw)
         self._set_stage(conn, run.run_id, "snapshotting", 62, progress, cancel_requested)
@@ -417,21 +412,15 @@ class InspectionRunner:
         self._set_stage(conn, run.run_id, "scoring", 82, progress, cancel_requested)
         finalize_run_summary(conn, run.run_id)
         self._set_stage(conn, run.run_id, "reporting", 90, progress, cancel_requested)
-        update_run(conn, run.run_id, "success", "success", 100)
-        if progress:
-            progress("success", 100)
 
-        comparison = RunComparisonBuilder().build(conn, previous_run_id, run.run_id) if previous_run_id else None
-        report_context = ReportContextBuilder().build(conn, run.run_id, comparison=comparison)
-        if previous_run_id:
-            report_context["history_comparison"] = HistoryComparisonBuilder().build(conn, previous_run_id, run.run_id)
+        report_context = self._build_report_context(conn, run.run_id, previous_run_id)
         report_data = ReportDataFactory().from_context(report_context)
         report_data.report_info.report_title = (report_title or "").strip() or DEFAULT_REPORT_TITLE
         index_path = paths.report_dir / "index.html"
         zip_path: Path | None = None
         html_error: str | None = None
         try:
-            index_path, zip_path = HtmlReportPackageBuilder().render(report_data, report_context, paths.report_dir, zip_package=zip_report)
+            index_path, zip_path = HtmlReportPackageBuilder().render(report_data, report_context, paths.report_dir, zip_package=zip_report, secrets=secrets)
             paths = replace(paths, report_dir=index_path.parent)
             insert_report(
                 conn,
@@ -444,8 +433,10 @@ class InspectionRunner:
                 report_type="html_package",
                 report_name=report_data.report_info.report_title,
             )
+        except RunnerCancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001 - each customer format is attempted independently.
-            html_error = f"HTML 报告生成失败：{exc}"
+            html_error = f"HTML 报告生成失败：{redact_sensitive(exc, *secrets)}"
             insert_report(
                 conn,
                 run.run_id,
@@ -470,18 +461,30 @@ class InspectionRunner:
                 report_type="zip",
                 report_name="VStackLens Zip Report Package",
             )
+        self._set_stage(conn, run.run_id, "reporting_json", 92, progress, cancel_requested)
         json_path = paths.report_dir.parent / f"{paths.report_dir.name}_inspection_result.json"
-        report_data.write_json(json_path)
-        insert_report(conn, run.run_id, run.customer_id, site_id, run.vcenter_id, str(json_path), "success", report_type="json", report_name="Inspection Result JSON")
+        from vstacklens.application.artifact_publish import staged_file
+        json_error: str | None = None
+        try:
+            with staged_file(json_path, secrets=secrets) as staged_json:
+                report_data.write_json(staged_json)
+        except RunnerCancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one internal export cannot discard other safe formats.
+            json_error = f"完整结果交付失败：{redact_sensitive(exc, *secrets)}"
+        insert_report(conn, run.run_id, run.customer_id, site_id, run.vcenter_id, str(json_path), "failed" if json_error else "success", error=json_error, report_type="json", report_name="Inspection Result JSON")
         docx_path: Path | None = None
         docx_error: str | None = None
         if paths.docx_out:
+            self._set_stage(conn, run.run_id, "reporting_word", 93, progress, cancel_requested)
             try:
-                rendered_path, report_type, report_name = ReportExportEngine().render(report_data, paths.docx_out)
+                rendered_path, report_type, report_name = ReportExportEngine().render(report_data, paths.docx_out, secrets=secrets)
                 docx_path = rendered_path
                 insert_report(conn, run.run_id, run.customer_id, site_id, run.vcenter_id, str(rendered_path), "success", report_type=report_type, report_name=report_name)
-            except Exception as exc:  # noqa: BLE001 - Word is an optional delivery artifact; HTML remains primary.
-                docx_error = f"Word 报告生成失败：{exc}"
+            except RunnerCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - preserve optional delivery failure without losing other formats.
+                docx_error = f"Word 报告生成失败：{redact_sensitive(exc, *secrets)}"
                 insert_report(
                     conn,
                     run.run_id,
@@ -497,8 +500,9 @@ class InspectionRunner:
         pdf_path: Path | None = None
         pdf_error: str | None = None
         if paths.pdf_out:
+            self._set_stage(conn, run.run_id, "reporting_pdf", 95, progress, cancel_requested)
             try:
-                pdf_path = PdfReportEngine().render(report_data, paths.pdf_out, report_context=report_context)
+                pdf_path = PdfReportEngine().render(report_data, paths.pdf_out, report_context=report_context, secrets=secrets)
                 insert_report(
                     conn,
                     run.run_id,
@@ -510,8 +514,10 @@ class InspectionRunner:
                     report_type="pdf",
                     report_name="VStackLens PDF Report",
                 )
-            except Exception as exc:  # noqa: BLE001 - PDF is an optional delivery artifact; HTML remains primary.
-                pdf_error = f"PDF 报告生成失败：{exc}"
+            except RunnerCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - preserve optional delivery failure without losing other formats.
+                pdf_error = f"PDF 报告生成失败：{redact_sensitive(exc, *secrets)}"
                 insert_report(
                     conn,
                     run.run_id,
@@ -526,33 +532,90 @@ class InspectionRunner:
                 )
         payload_path = paths.report_dir / "data" / "customer_report_payload.json"
         engineering_path = paths.report_dir / "engineering_diagnostics.md"
-        scan_paths = [path for path in (index_path, payload_path, json_path) if path.is_file()]
+        internal_errors = [json_error] if json_error else []
+        diagnostic_path: Path | None = None
+        if raw.get("collection_diagnostics"):
+            try:
+                diagnostic_path = paths.report_dir / "collection_diagnostics.json"
+                with staged_file(diagnostic_path, secrets=secrets) as staged_diagnostic:
+                    staged_diagnostic.write_text(json.dumps(raw["collection_diagnostics"], ensure_ascii=False, indent=2), encoding="utf-8")
+            except RunnerCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - retain all other delivery results.
+                diagnostic_path = None
+                internal_errors.append(f"采集诊断交付失败：{redact_sensitive(exc, *secrets)}")
+        # Roles are assigned to these exact outputs, never inferred from a JSON
+        # suffix or directory name. Customer payload and the ZIP remain customer.
+        scan_paths = [] if html_error else [index_path, payload_path]
+        engineering_paths = {json_path}
+        if not json_error:
+            scan_paths.append(json_path)
+        if diagnostic_path:
+            scan_paths.append(diagnostic_path)
+            engineering_paths.add(diagnostic_path)
         if zip_path:
             scan_paths.append(zip_path)
         if docx_path:
             scan_paths.append(docx_path)
         if pdf_path:
             scan_paths.append(pdf_path)
-        artifact_findings = scan_artifacts(scan_paths)
-        write_engineering_diagnostics(
-            engineering_path,
-            run_id=run.run_id,
-            vcenter=str(report_context.get("environment_info", {}).get("vcenter_address") or ""),
-            customer_name=str(report_context.get("customer_info", {}).get("customer_name") or ""),
-            site_name=str(report_context.get("customer_info", {}).get("site_name") or ""),
-            report_dir=paths.report_dir,
-            db_path=db,
-            report_context=report_context,
-            report_paths={
-                "HTML": index_path if index_path.is_file() else None,
-                "Word": docx_path,
-                "PDF": pdf_path,
-                "JSON": json_path,
-                "客户载荷": payload_path,
-            },
-            artifact_findings=artifact_findings,
-            secrets=secrets,
-        )
+        self._set_stage(conn, run.run_id, "scanning_reports", 97, progress, cancel_requested)
+        try:
+            artifact_findings = scan_artifacts(scan_paths, engineering_paths=engineering_paths, secrets=secrets)
+        except RunnerCancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - scanner failure never means that any scheduled output is safe.
+            artifact_findings = [ArtifactScanFinding(path, f"无法扫描：{type(exc).__name__}") for path in scan_paths]
+        html_scan_error = self._scan_error(artifact_findings, [index_path, payload_path, *([zip_path] if zip_path else [])], "HTML")
+        word_scan_error = self._scan_error(artifact_findings, [docx_path] if docx_path else [], "Word")
+        pdf_scan_error = self._scan_error(artifact_findings, [pdf_path] if pdf_path else [], "PDF")
+        json_scan_error = self._scan_error(artifact_findings, [json_path], "完整结果")
+        diagnostic_scan_error = self._scan_error(artifact_findings, [diagnostic_path] if diagnostic_path else [], "采集诊断")
+        if html_scan_error:
+            html_error = html_scan_error
+            self._fail_report_scan(conn, run.run_id, "html_package", html_scan_error)
+            if zip_path:
+                self._fail_report_scan(conn, run.run_id, "zip", html_scan_error)
+                zip_path = None
+        if word_scan_error:
+            docx_error, docx_path = word_scan_error, None
+            self._fail_report_scan(conn, run.run_id, "docx", word_scan_error)
+        if pdf_scan_error:
+            pdf_error, pdf_path = pdf_scan_error, None
+            self._fail_report_scan(conn, run.run_id, "pdf", pdf_scan_error)
+        if json_scan_error:
+            internal_errors.append(json_scan_error)
+            self._fail_report_scan(conn, run.run_id, "json", json_scan_error)
+        if diagnostic_scan_error:
+            internal_errors.append(diagnostic_scan_error)
+        self._set_stage(conn, run.run_id, "registering_reports", 98, progress, cancel_requested)
+        engineering_error: str | None = None
+        try:
+            with staged_file(engineering_path, secrets=secrets) as staged_engineering:
+                write_engineering_diagnostics(
+                    staged_engineering,
+                    run_id=run.run_id,
+                    vcenter=str(report_context.get("environment_info", {}).get("vcenter_address") or ""),
+                    customer_name=str(report_context.get("customer_info", {}).get("customer_name") or ""),
+                    site_name=str(report_context.get("customer_info", {}).get("site_name") or ""),
+                    report_dir=paths.report_dir,
+                    db_path=db,
+                    report_context=report_context,
+                    report_paths={
+                        "HTML": index_path if not html_error else None,
+                        "Word": docx_path,
+                        "PDF": pdf_path,
+                        "JSON": json_path if not json_error and not json_scan_error else None,
+                        "客户载荷": payload_path if not html_error else None,
+                    },
+                    artifact_findings=artifact_findings,
+                    secrets=secrets,
+                )
+        except RunnerCancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - final diagnostics must also pass the internal safety gate.
+            engineering_error = f"工程诊断交付失败：{redact_sensitive(exc, *secrets)}"
+            internal_errors.append(engineering_error)
         insert_report(
             conn,
             run.run_id,
@@ -560,13 +623,24 @@ class InspectionRunner:
             site_id,
             run.vcenter_id,
             str(engineering_path),
-            "success",
+            "failed" if engineering_error else "success",
+            error=engineering_error,
             report_type="engineering_diagnostics",
             report_name="Engineering Diagnostics Markdown",
         )
+        self._set_stage(conn, run.run_id, "finalizing", 99, progress, cancel_requested)
+        delivery_errors = [message for message in (html_error, docx_error, pdf_error, *internal_errors) if message]
+        update_run(
+            conn, run.run_id, "failed" if delivery_errors else "success",
+            "delivery_failed" if delivery_errors else "success", 100,
+            "；".join(delivery_errors)[:1000] if delivery_errors else None,
+        )
+        conn.commit()
+        if progress:
+            progress("delivery_failed" if delivery_errors else "success", 100)
         return RunnerResult(
             run_id=run.run_id,
-            report_path=index_path,
+            report_path=index_path if not html_error else paths.report_dir / "blocked-customer-report",
             report_dir=paths.report_dir,
             zip_path=zip_path,
             docx_path=docx_path,
@@ -574,7 +648,50 @@ class InspectionRunner:
             pdf_path=pdf_path,
             pdf_error=pdf_error,
             html_error=html_error,
+            delivery_error="；".join(internal_errors) if internal_errors else None,
         )
+
+    @staticmethod
+    def _scan_error(findings: list[Any], paths: list[Path], label: str) -> str | None:
+        selected = {path.resolve() for path in paths}
+        reasons = sorted({item.reason for item in findings if item.path.resolve() in selected})
+        return f"{label} 交付扫描未通过：" + "；".join(reasons) if reasons else None
+
+    @staticmethod
+    def _fail_report_scan(conn: Any, run_id: str, report_type: str, error: str) -> None:
+        conn.execute(
+            "UPDATE reports SET report_status = 'failed', error_message = ?, generated_at = NULL, updated_at = ? WHERE run_id = ? AND report_type = ?",
+            (error, utc_now_iso(), run_id, report_type),
+        )
+
+    def _build_report_context(self, conn: Any, run_id: str, previous_run_id: str | None) -> dict[str, Any]:
+        actual_run = dict(conn.execute("SELECT * FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone())
+        # History comparison accepts only completed inspections. The snapshot and
+        # rule results are complete here; delivery is still running. Project only
+        # this read transaction, without exposing a premature terminal state.
+        conn.execute("SAVEPOINT report_context_projection")
+        try:
+            conn.execute("UPDATE inspection_runs SET run_status = 'success' WHERE run_id = ?", (run_id,))
+            comparison = RunComparisonBuilder().build(conn, previous_run_id, run_id) if previous_run_id else None
+            context = ReportContextBuilder().build(conn, run_id, comparison=comparison)
+            if previous_run_id:
+                context["history_comparison"] = HistoryComparisonBuilder().build(conn, previous_run_id, run_id)
+        finally:
+            conn.execute("ROLLBACK TO report_context_projection")
+            conn.execute("RELEASE report_context_projection")
+        context["run"] = actual_run
+        if comparison:
+            comparison["current_run"] = actual_run.copy()
+        return context
+
+    @staticmethod
+    def _redact_inventory(value, secrets):
+        import re
+        if isinstance(value, dict):
+            return {redact_sensitive(key, *secrets): "[REDACTED]" if re.search(r"(?i)^(?:password|passwd|pwd|api[_-]?key|authorization|secret|token|cookie)$", str(key)) else InspectionRunner._redact_inventory(item, secrets) for key,item in value.items()}
+        if isinstance(value, list):
+            return [InspectionRunner._redact_inventory(item, secrets) for item in value]
+        return redact_sensitive(value, *secrets) if isinstance(value, str) else value
 
     def _atomic_stage(self, conn: Any, name: str, operation: Callable[[], Any]) -> Any:
         savepoint = f"sp_{name}"
@@ -612,9 +729,11 @@ class InspectionRunner:
     ) -> None:
         if not cancel_requested or not cancel_requested():
             return
-        update_run(conn, run_id, "cancelled", "cancelled", 100, "巡检已取消。")
+        row = conn.execute("SELECT progress_percent FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone()
+        percent = min(int(row[0] or 0), 99)
+        update_run(conn, run_id, "cancelled", "cancelled", percent, "巡检已取消。")
         if progress:
-            progress("cancelled", 100)
+            progress("cancelled", percent)
         raise RunnerCancelledError("巡检已取消。")
 
     def _collect_with_progress(

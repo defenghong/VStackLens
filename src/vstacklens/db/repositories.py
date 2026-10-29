@@ -14,7 +14,16 @@ def ensure_default_scope(
     username: str | None = None,
     customer_name: str | None = None,
     site_name: str | None = None,
+    environment_id: str | None = None,
+    port: int = 443,
 ) -> tuple[str, str, str]:
+    if environment_id:
+        profile = conn.execute("SELECT * FROM vcenters WHERE vcenter_id=?", (environment_id,)).fetchone()
+        if not profile or profile["status"] != "active":
+            raise ValueError("所选环境不存在或已停用，请重新选择环境档案。")
+        if profile["host"].casefold() != vcenter_host.casefold() or profile["port"] != port:
+            raise ValueError("巡检地址与所选环境档案不一致，请先编辑档案或切换为手动输入。")
+        return profile["customer_id"], profile["site_id"], profile["vcenter_id"]
     now = utc_now_iso()
     customer_name = customer_name or "未指定客户"
     site_name = site_name or "未指定站点"
@@ -38,14 +47,16 @@ def ensure_default_scope(
             (site_id, customer_id, site_name, "active", now, now),
         )
 
-    vcenter = conn.execute("SELECT vcenter_id FROM vcenters WHERE site_id = ? AND host = ?", (site_id, vcenter_host)).fetchone()
+    vcenter = conn.execute("SELECT vcenter_id,status FROM vcenters WHERE site_id = ? AND host = ? AND port=?", (site_id, vcenter_host, port)).fetchone()
     if vcenter:
+        if vcenter["status"] != "active":
+            raise ValueError("该环境档案已停用，请先在环境档案中启用。")
         vcenter_id = vcenter["vcenter_id"]
     else:
         vcenter_id = new_id("vc")
         conn.execute(
             "INSERT INTO vcenters VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (vcenter_id, customer_id, site_id, vcenter_host, vcenter_host, 443, username, 0, "active", now, now),
+            (vcenter_id, customer_id, site_id, vcenter_host, vcenter_host, port, username, 0, "active", now, now),
         )
     return customer_id, site_id, vcenter_id
 

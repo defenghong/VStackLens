@@ -72,7 +72,9 @@ class DocxReportV2Engine(DocxReportEngine):
         self._chapter_assets(document, report)
         self._chapter_appendix(document, report)
 
-        document.save(output_path)
+        from vstacklens.application.artifact_publish import staged_file
+        with staged_file(output_path) as stage:
+            document.save(stage)
         return output_path
 
     def _setup_v2_document(self, document: Document, report: ReportData) -> None:

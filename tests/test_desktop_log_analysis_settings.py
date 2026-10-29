@@ -109,8 +109,11 @@ def test_report_center_pdf_button_opens_pdf_file_path(tmp_path: Path, monkeypatc
         path_hint=str(html_path),
     )
     window._report_items = [item]
-    window.report_list.addItem("测试报告")
-    window.report_list.setCurrentRow(0)
+    window.report_list.setRowCount(1)
+    from PySide6.QtWidgets import QTableWidgetItem
+    from PySide6.QtCore import Qt
+    cell=QTableWidgetItem("测试报告");cell.setData(Qt.UserRole,0);window.report_list.setItem(0,0,cell)
+    window.report_list.setCurrentCell(0,0)
     assert window._pdf_report_path_for_item(item) == pdf_path
     window._report_selection_changed()
     app.processEvents()
@@ -141,6 +144,11 @@ def test_pdf_reader_renders_pages_and_navigates_without_browser(tmp_path: Path) 
     app.processEvents()
     assert reader.page_label.text() == "第 2 / 2 页"
     reader.close()
+    reader.close()
+    reader._change_page(-1)
+    reader._change_zoom(0.15)
+    reader._render_page()
+    assert reader.document.is_closed
 
 
 def test_settings_page_shows_collapsible_model_and_security_sections(tmp_path: Path) -> None:

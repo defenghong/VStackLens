@@ -12,6 +12,8 @@ from pathlib import Path
 
 from vstacklens.application import InspectionService
 from vstacklens.db.connection import connect, init_db
+from vstacklens.reports.customer_caliber import yaml_rules
+from vstacklens.reports.rule_provenance import capture_rule
 from vstacklens.reports.history_compare import (
     STATE_EMPTY,
     STATE_ENVIRONMENT_MISMATCH,
@@ -183,6 +185,8 @@ def _add_rule_result(
     risk_level: str = "P1",
     result_status: str = "failed",
 ) -> None:
+    rule = yaml_rules()[rule_id]
+    rule_snapshot = capture_rule(rule, {key: value["default"] for key, value in (rule.get("parameters") or {}).items()})
     conn.execute(
         """
         INSERT INTO rule_results (
@@ -207,7 +211,7 @@ def _add_rule_result(
             "high",
             "当前状态",
             "建议状态",
-            json.dumps({"current_value": "当前状态", "expected_value": "建议状态"}),
+            json.dumps({"current_value": "当前状态", "expected_value": "建议状态", "rule_snapshot": rule_snapshot}),
             json.dumps({}),
             None,
             NOW,
@@ -411,7 +415,8 @@ def test_invalid_explicit_run_ids_do_not_fall_back_to_other_environment(tmp_path
     assert unknown_baseline["state"] == STATE_RUN_UNAVAILABLE
     _assert_not_comparable(unknown_baseline)
     assert [option["run_id"] for option in unknown_baseline["run_options"]] == ["run-a2", "run-a1"]
-    assert valid_pair["state"] == STATE_READY
+    assert valid_pair["state"] == "legacy_caliber"
+    _assert_not_comparable(valid_pair)
 
 
 def test_failed_or_running_runs_are_not_candidates(tmp_path: Path) -> None:
@@ -491,8 +496,8 @@ def test_same_instance_uuid_keeps_comparison_ready(tmp_path: Path) -> None:
 
     payload = _build(db_path)
 
-    assert payload["state"] == STATE_READY
-    assert payload["score"]["delta"] == 5.0
+    assert payload["state"] == "legacy_caliber"
+    _assert_not_comparable(payload)
 
 
 # --------------------------------------------------------------------------

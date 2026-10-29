@@ -14,6 +14,8 @@ from vstacklens.deep.contracts import (
     DeepDataset,
     DeepDiagnosticRecord,
     DeepFinding,
+    DeepObjectEvaluation,
+    EvidenceReference,
     DeepReport,
     DeepResultStatus,
     DeepRuleDefinition,
@@ -785,11 +787,13 @@ class TrendAnalyzer:
         findings: list[DeepFinding] = []
         statuses: list[DeepResultStatus] = []
         refs: list[str] = []
+        derived_evidence: list[EvidenceReference] = []
         insufficient_reasons: list[str] = []
         for group_records in groups:
             result, finding = self._analyze_group(dataset, rule, thresholds, group_records, now)
             statuses.append(result.status)
             refs.extend(result.evidence_refs)
+            derived_evidence.extend(result.derived_evidence)
             if result.reason:
                 insufficient_reasons.append(result.reason)
             if finding:
@@ -809,6 +813,7 @@ class TrendAnalyzer:
             status=status,
             finding_ids=[item.finding_id for item in findings],
             evidence_refs=refs,
+            derived_evidence=derived_evidence,
             reason="; ".join(sorted(set(insufficient_reasons))) if status == DeepResultStatus.INSUFFICIENT_DATA else "",
             evaluated_at_utc=now,
         ), findings
@@ -868,6 +873,7 @@ class TrendAnalyzer:
             status=result_status,
             finding_ids=[finding_id(rule.rule_id, scope)] if triggered else [],
             evidence_refs=[item.ref for item in refs],
+            derived_evidence=[derived_ref],
             evaluated_at_utc=now,
         )
         if not triggered:
@@ -1150,16 +1156,16 @@ class DeepAnalyzer:
     def analyze(
         self,
         dataset: DeepDataset,
-        rules: tuple[DeepRuleDefinition, ...] = BUILTIN_DEEP_RULES,
+        rules: tuple[DeepRuleDefinition, ...] | None = None,
         thresholds: ThresholdRegistry | None = None,
     ) -> DeepAnalysisResult:
-        from vstacklens.deep.policies import default_threshold_registry
+        from vstacklens.deep.provenance import choose_policy
 
-        registry = thresholds or default_threshold_registry()
+        rules, registry, provenance = choose_policy(dataset, rules, thresholds)
         results: list[DeepRuleResult] = []
         findings: list[DeepFinding] = []
         for rule in rules:
-            result, finding = self._evaluate_rule(dataset, rule, registry)
+            result, finding = self._safe_evaluate_rule(dataset, rule, registry)
             if result.status == DeepResultStatus.PASS and self._manifest_degradation_affects_rule(dataset, rule):
                 result = result.model_copy(
                     update={
@@ -1167,23 +1173,63 @@ class DeepAnalyzer:
                         "reason": self._manifest_degradation_reason(dataset, rule),
                     }
                 )
+            result.object_results = self._object_evaluations(dataset, rule, registry)
+            if result.status == DeepResultStatus.PASS and any(item.status in {DeepResultStatus.INSUFFICIENT_DATA, DeepResultStatus.ERROR, DeepResultStatus.NOT_EVALUATED} for item in result.object_results):
+                result.status = DeepResultStatus.INSUFFICIENT_DATA
+                result.reason = "object-level coverage is incomplete; no complete rule pass can be established"
             results.append(result)
             if isinstance(finding, list):
                 findings.extend(finding)
             elif finding:
                 findings.append(finding)
         report = self._build_report(results, findings)
+        report.analysis_provenance = provenance
+        report.boundary_statement += " " + provenance["boundary"]
         diagnostic = DeepDiagnosticRecord(
             dataset_id=dataset.dataset_id,
             created_at_utc=now_utc_iso(),
             capability=dataset.capability,
             rule_results=results,
             collection_log=dataset.collection_log,
-            errors=[{"rule_id": item.rule_id, "reason": item.reason} for item in results if item.status == DeepResultStatus.ERROR],
+            errors=[*[{"rule_id": item.rule_id, "reason": item.reason, **item.failure_details} for item in results if item.status == DeepResultStatus.ERROR], *[{"action": item.get("action"), "status": item.get("status"), **item["failure_details"]} for item in dataset.collection_log if item.get("failure_details")]],
             impact=dataset.manifest.impact,
             integrity=dataset.manifest.integrity,
+            analysis_provenance=provenance,
         )
         return DeepAnalysisResult(report=report, diagnostic=diagnostic, rule_results=results, findings=findings)
+
+    def _safe_evaluate_rule(self, dataset: DeepDataset, rule: DeepRuleDefinition, thresholds: ThresholdRegistry):
+        from vstacklens.collection.diagnostics import exception_details
+
+        try:
+            return self._evaluate_rule(dataset, rule, thresholds)
+        except Exception as exc:  # one rule fault must not erase independent checks
+            details = exception_details(exc, context=rule.rule_id)
+            return DeepRuleResult(rule_id=rule.rule_id, rule_version=rule.rule_version, category=rule.category,
+                                  profile=rule.profile, status=DeepResultStatus.ERROR, reason=details["category"],
+                                  failure_details=details, evaluated_at_utc=now_utc_iso()), None
+
+    def _object_evaluations(self, dataset: DeepDataset, rule: DeepRuleDefinition, thresholds: ThresholdRegistry) -> list[DeepObjectEvaluation]:
+        from vstacklens.collection.diagnostics import permission_failure
+        grouped: dict[str, list[DatasetRecord]] = {}
+        for record in dataset.records:
+            if record.kind == rule.record_kind and record.metadata.get("rule_id", record.selector.get("rule_id")) == rule.rule_id:
+                grouped.setdefault(record.entity.stable_id, []).append(record)
+        evaluations = []
+        for records in grouped.values():
+            subset = dataset.model_copy(update={"records": records})
+            result, _ = self._safe_evaluate_rule(subset, rule, thresholds)
+            status, reason = result.status, result.reason
+            if status == DeepResultStatus.PASS and (
+                self._manifest_degradation_affects_rule(dataset, rule)
+                or any(record.metadata.get("coverage_complete") is False or record.metadata.get("collection_degraded") for record in records)
+            ):
+                status, reason = DeepResultStatus.INSUFFICIENT_DATA, "object evidence coverage is incomplete"
+            failed_capabilities = [dataset.capability.get(item) for item in result.missing_capabilities]
+            if any(item and permission_failure(item.detail) for item in failed_capabilities):
+                reason = "permission_denied"
+            evaluations.append(DeepObjectEvaluation(scope=self._scope(rule, records), status=status, reason=reason, evidence_refs=result.evidence_refs))
+        return evaluations
 
     @staticmethod
     def _manifest_degradation_affects_rule(dataset: DeepDataset, rule: DeepRuleDefinition) -> bool:
@@ -1306,7 +1352,7 @@ class DeepAnalyzer:
                 evaluated_at_utc=now,
             ), None
         matched = [record for record in records if record.finding]
-        scope = self._scope(rule, records)
+        scope = self._scope(rule, matched or records)
         refs = [evidence_ref(record) for record in matched or records]
         result = DeepRuleResult(
             rule_id=rule.rule_id,

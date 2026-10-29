@@ -8,7 +8,17 @@ from vstacklens.reports.report_model import ReportData
 
 
 class ReportExportEngine:
-    def render(self, report: ReportData, output_path: Path) -> tuple[Path, str, str]:
+    def render(self, report: ReportData, output_path: Path, *, secrets: tuple[str, ...] = ()) -> tuple[Path, str, str]:
+        from vstacklens.application.artifact_publish import staged_file
+        from vstacklens.reports.product_evidence import staged_product_file
+        output_path = output_path.with_suffix(".docx") if not output_path.suffix else output_path
+        stage_context = (staged_product_file(report, output_path, secrets=secrets, overwrite=False)
+                         if report.product_modules else staged_file(output_path, secrets=secrets))
+        with stage_context as stage:
+            _, report_type, report_name = self._render(report, stage)
+        return output_path, report_type, report_name
+
+    def _render(self, report: ReportData, output_path: Path) -> tuple[Path, str, str]:
         suffix = output_path.suffix.lower()
         if suffix == ".json":
             report.write_json(output_path)

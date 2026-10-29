@@ -412,7 +412,7 @@ DETAIL_LABELS = {
 
 
 class ReportContextBuilder:
-    def build(self, conn: sqlite3.Connection, run_id: str, comparison: dict[str, Any] | None = None) -> dict:
+    def build(self, conn: sqlite3.Connection, run_id: str, comparison: dict[str, Any] | None = None, *, include_history: bool = True) -> dict:
         run = conn.execute("SELECT * FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone()
         customer = conn.execute(
             """
@@ -437,25 +437,27 @@ class ReportContextBuilder:
         ).fetchall()
         findings = conn.execute(
             """
-            SELECT f.*, rr.observed_value, rr.expected_value, rr.evidence_json, rr.raw_json, rr.evaluated_at, rr.object_path, r.rule_name, r.definition_json
-            FROM findings f
-            JOIN rule_results rr ON rr.result_id = f.latest_result_id
-            LEFT JOIN rules r ON r.rule_id = f.rule_id
-            WHERE f.last_seen_run_id = ? AND f.status != 'exception'
-            ORDER BY f.risk_level, f.rule_id, f.object_name
-            """,
-            (run_id,),
+            SELECT rr.*, rr.result_id AS finding_id,
+                   'open' AS status, r.rule_name, r.definition_json
+            FROM rule_results rr
+            LEFT JOIN findings f ON f.latest_result_id = rr.result_id
+            LEFT JOIN rules r ON r.rule_id = rr.rule_id
+            WHERE rr.run_id = ? AND rr.result_status = 'failed'
+              AND COALESCE(f.status, '') != 'exception'
+            ORDER BY rr.risk_level, rr.rule_id, rr.object_name
+            """, (run_id,),
         ).fetchall()
         exception_findings = conn.execute(
             """
-            SELECT f.*, rr.observed_value, rr.expected_value, rr.evidence_json, rr.raw_json, rr.evaluated_at, rr.object_path, r.rule_name, r.definition_json
-            FROM findings f
-            JOIN rule_results rr ON rr.result_id = f.latest_result_id
-            LEFT JOIN rules r ON r.rule_id = f.rule_id
-            WHERE f.last_seen_run_id = ? AND f.status = 'exception'
-            ORDER BY f.risk_level, f.rule_id, f.object_name
-            """,
-            (run_id,),
+            SELECT rr.*, rr.result_id AS finding_id, f.status,
+                   f.exception_reason, f.exception_owner, f.exception_expires_at, f.exception_approval_note,
+                   r.rule_name, r.definition_json
+            FROM rule_results rr
+            JOIN findings f ON f.latest_result_id = rr.result_id
+            LEFT JOIN rules r ON r.rule_id = rr.rule_id
+            WHERE rr.run_id = ? AND rr.result_status = 'failed' AND f.status = 'exception'
+            ORDER BY rr.risk_level, rr.rule_id, rr.object_name
+            """, (run_id,),
         ).fetchall()
         unavailable = conn.execute(
             """
@@ -520,13 +522,18 @@ class ReportContextBuilder:
         unavailable_list = [self._rule_result_row(row) for row in unavailable]
         asset_summary = {row["object_type"]: row["c"] for row in objects}
         object_result_list = [self._object_result_row(row) for row in object_results]
+        from vstacklens.reports.rule_provenance import recorded_rule, snapshot_from
+        self._run_rule_definitions = {item["rule_id"]: recorded_rule(item) for item in object_result_list}
+        self._run_rule_snapshots = {item["rule_id"]: snapshot_from(item) for item in object_result_list}
+        self._run_object_types = {item["rule_id"]: item["object_type"] for item in object_result_list}
         certificate_license_evidence = self._certificate_license_evidence(object_result_list)
         status_summary = self._status_summary(result_status_summary)
         rule_catalog = [self._rule_catalog_row(row) for row in rules]
         scope = dict(customer) if customer else {}
         vcenter_info = self._vcenter_info(scope, inventory_objects)
         vsan_summary = self._vsan_summary(inventory_objects)
-        vsan_categories, vsan_findings, vsan_mapping = self._vsan_report_semantics(vsan_summary)
+        bridge_snapshot = next((snapshot_from(item) for item in object_result_list if item["rule_id"] == "VSL-DS-020"), {})
+        vsan_categories, vsan_findings, vsan_mapping = self._vsan_report_semantics(vsan_summary, bridge_snapshot=bridge_snapshot)
         findings_list.extend(vsan_findings)
         findings_list = sorted(findings_list, key=risk_sort_key)
         risk_summary = self._risk_summary(findings_list)
@@ -539,7 +546,7 @@ class ReportContextBuilder:
             conn,
             (comparison or {}).get("previous_run_id") if comparison else None,
             run_id,
-        )
+        ) if include_history else {"state": "empty"}
         return {
             "run": dict(run) if run else {},
             "scope": scope,
@@ -754,7 +761,21 @@ class ReportContextBuilder:
                     rows.append({"host": host, "disk_group": group_name, "role": role, "device": str(device), "health": health})
         return rows
 
-    def _vsan_report_semantics(self, summary: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
+    @staticmethod
+    def _yaml_bridge_grade(category_id: str, snapshot: dict | None = None) -> str:
+        from vstacklens.reports.customer_caliber import rule_grade, yaml_rules
+        from vstacklens.reports.rule_provenance import capture_rule
+        if snapshot is None:
+            rule = yaml_rules()["VSL-DS-020"]
+            snapshot = capture_rule(rule, {name: item.get("default") for name, item in rule.get("parameters", {}).items()})
+        return rule_grade({"rule_id": "", "grade_source_rule_id": "VSL-DS-020", "category_id": category_id, "rule_snapshot": snapshot})
+
+    def _vsan_report_semantics(self, summary: dict[str, Any], *, bridge_snapshot: dict | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Any]:
+        if bridge_snapshot is None:
+            from vstacklens.reports.rule_provenance import capture_rule
+            from vstacklens.reports.customer_caliber import yaml_rules
+            rule = yaml_rules()["VSL-DS-020"]
+            bridge_snapshot = capture_rule(rule, {name: item.get("default") for name, item in rule.get("parameters", {}).items()})
         categories: list[dict[str, Any]] = []
         candidate_findings: list[dict[str, Any]] = []
         applicable = summary.get("status") != "not_applicable"
@@ -795,7 +816,7 @@ class ReportContextBuilder:
         ]
         for category_id, status, detail in checks:
             definition = CATEGORY_DEFINITIONS[category_id]
-            categories.append({"category_id": category_id, "title": definition.title_zh, "risk_level": definition.priority, "status": status, "conclusion": detail})
+            categories.append({"category_id": category_id, "title": definition.title_zh, "risk_level": self._yaml_bridge_grade(category_id, bridge_snapshot), "status": status, "conclusion": detail})
             if status != "需关注":
                 continue
             candidate_findings.append({
@@ -809,8 +830,11 @@ class ReportContextBuilder:
                 "current_value": detail,
                 "current_value_zh": detail,
                 "expected_value_zh": "正常",
-                "risk_level": definition.priority,
+                "risk_level": self._yaml_bridge_grade(category_id, bridge_snapshot),
+                "rule_snapshot": bridge_snapshot,
+                "evidence": {"rule_snapshot": bridge_snapshot},
                 "category": "vSAN",
+                "grade_source_rule_id": "VSL-DS-020",
                 "module_name": "vSAN",
                 "health_impact": "attention",
                 "evidence_summary_zh": detail,
@@ -848,13 +872,15 @@ class ReportContextBuilder:
 
     def _finding_row(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        definition = self._json(item.pop("definition_json", None))
+        item.pop("definition_json", None)
         evidence = self._json(item.pop("evidence_json", None))
+        from vstacklens.reports.rule_provenance import recorded_rule
+        definition = recorded_rule({**item, "evidence": evidence})
         raw_evidence = self._json(item.pop("raw_json", None))
         report_fields = definition.get("report_fields", {})
         remediation = definition.get("remediation", {})
         evidence_schema = definition.get("evidence_schema", {})
-        fallback_name = item.get("rule_name") or item["rule_id"]
+        fallback_name = evidence.get("rule_name") or item["rule_id"]
         check_name = report_fields.get("check_name_zh") or report_fields.get("title_zh") or fallback_name
         finding_title = report_fields.get("finding_title_zh") or report_fields.get("title_zh") or fallback_name
         plain_summary = report_fields.get("plain_summary_zh") or report_fields.get("summary_zh") or ""
@@ -922,13 +948,15 @@ class ReportContextBuilder:
 
     def _object_result_row(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        definition = self._json(item.pop("definition_json", None))
+        item.pop("definition_json", None)
         evidence = self._json(item.pop("evidence_json", None))
+        from vstacklens.reports.rule_provenance import recorded_rule
+        definition = recorded_rule({**item, "evidence": evidence})
         raw_evidence = self._json(item.pop("raw_json", None))
         report_fields = definition.get("report_fields", {})
         remediation = definition.get("remediation", {})
         evidence_schema = definition.get("evidence_schema", {})
-        fallback_name = item.get("rule_name") or item["rule_id"]
+        fallback_name = evidence.get("rule_name") or item["rule_id"]
         check_name = report_fields.get("check_name_zh") or report_fields.get("title_zh") or fallback_name
         item["rule_name"] = check_name
         item["check_name"] = check_name
@@ -936,6 +964,7 @@ class ReportContextBuilder:
         item["module_name"] = rule_category_label(item["category"]) or object_type_label(item.get("object_type"))
         item["object_type_label"] = object_type_label(item.get("object_type"))
         item["title"] = item["rule_name"]
+        item["health_impact"] = self._health_impact(definition, item)
         item["summary"] = report_fields.get("plain_summary_zh") or report_fields.get("summary_zh") or ""
         item["false_positive_notes"] = report_fields.get("false_positive_notes_zh") or ""
         item["exception_guidance"] = report_fields.get("exception_guidance_zh") or ""
@@ -975,13 +1004,17 @@ class ReportContextBuilder:
 
     def _rule_catalog_row(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        definition = self._json(item.pop("definition_json", None))
+        item.pop("definition_json", None)
+        definition = getattr(self, "_run_rule_definitions", {}).get(item["rule_id"], {})
+        item["risk_level"] = definition.get("risk_level")
+        item["category"] = definition.get("category", "")
+        item["object_type"] = definition.get("object_type") or getattr(self, "_run_object_types", {}).get(item["rule_id"], "")
         report_fields = definition.get("report_fields", {})
         data_source = definition.get("data_source", {})
         sampling = data_source.get("sampling") or {}
         evidence_schema = definition.get("evidence_schema", {})
         severity_policy = definition.get("severity_policy", {})
-        fallback_name = item.get("rule_name") or item["rule_id"]
+        fallback_name = definition.get("rule_name") or item["rule_id"]
         item["rule_name"] = report_fields.get("check_name_zh") or report_fields.get("title_zh") or fallback_name
         item["check_name"] = item["rule_name"]
         item["finding_title"] = report_fields.get("finding_title_zh") or report_fields.get("title_zh") or fallback_name
@@ -1014,12 +1047,15 @@ class ReportContextBuilder:
 
     def _rule_result_row(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        definition = self._json(item.pop("definition_json", None))
+        item.pop("definition_json", None)
         evidence = self._json(item.pop("evidence_json", None))
+        from vstacklens.reports.rule_provenance import recorded_rule
+        definition = recorded_rule({**item, "evidence": evidence})
         report_fields = definition.get("report_fields", {})
-        fallback_name = item.get("rule_name") or item["rule_id"]
+        fallback_name = definition.get("rule_name") or item["rule_id"]
         item["rule_name"] = report_fields.get("check_name_zh") or report_fields.get("title_zh") or fallback_name
         item["title"] = item["rule_name"]
+        item["health_impact"] = self._health_impact(definition, item)
         item["evidence"] = evidence
         item["data_quality"] = evidence.get("data_quality", "")
         item["api_path"] = evidence.get("api_path", "")
@@ -1049,10 +1085,10 @@ class ReportContextBuilder:
         grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {"rule_id": "", "rule_name": "", "counts": Counter()})
         for row in rows:
             rule_id = row["rule_id"]
-            definition = self._json(row["definition_json"]) if "definition_json" in row.keys() else {}
+            definition = getattr(self, "_run_rule_definitions", {}).get(rule_id, {})
             report_fields = definition.get("report_fields", {})
             grouped[rule_id]["rule_id"] = rule_id
-            grouped[rule_id]["rule_name"] = report_fields.get("check_name_zh") or report_fields.get("title_zh") or row["rule_name"] or rule_id
+            grouped[rule_id]["rule_name"] = report_fields.get("check_name_zh") or report_fields.get("title_zh") or definition.get("rule_name") or rule_id
             grouped[rule_id]["counts"][row["result_status"]] += row["c"]
         result = []
         for item in grouped.values():
@@ -1061,6 +1097,7 @@ class ReportContextBuilder:
                 {
                     "rule_id": item["rule_id"],
                     "rule_name": item["rule_name"],
+                    "rule_snapshot": getattr(self, "_run_rule_snapshots", {}).get(item["rule_id"], {}),
                     "failed": counts.get("failed", 0),
                     "passed": counts.get("passed", 0),
                     "unavailable": counts.get("unavailable", 0),
@@ -1251,6 +1288,7 @@ class ReportContextBuilder:
             "connection_diagnostics": diagnostics,
             "security_warnings": properties.get("security_warnings") if isinstance(properties.get("security_warnings"), list) else [],
             "collection_warnings": collection_warnings[:20],
+            "collection_warning_count": len(collection_warnings),
         }
 
     def _unavailable_reason(self, item: dict[str, Any]) -> str:
@@ -1345,6 +1383,9 @@ class ReportContextBuilder:
         return self._normalize_text(str(value))
 
     def _display_value_for_item(self, item: dict[str, Any], field_name: str) -> str:
+        if field_name == "current_value" and item.get("rule_id") in {"VSL-VC-006", "VSL-HOST-023"}:
+            from vstacklens.reports.license_evidence import expiry_label
+            return expiry_label(item.get("observed_detail") or {}, item.get("object_type") == "HostSystem", item.get("object_key"))
         semantic_key = self._semantic_key_for_item(item, field_name)
         if semantic_key:
             display_value = self._display_value_for_semantic_key(item.get(field_name), semantic_key, field_name)
@@ -1369,7 +1410,7 @@ class ReportContextBuilder:
             return f"未发现{label}" if number == 0 else f"发现 {number} {unit}{label}"
         if rule_id in {"VSL-VC-006", "VSL-HOST-023"} and isinstance(value, (int, float)):
             if value >= 999999:
-                return "永久授权"
+                return "到期状态无法确认（历史数值缺少永久依据）"
             number = int(value) if float(value).is_integer() else value
             return f"剩余 {number} 天"
         if rule_id in {"VSL-VC-005", "VSL-HOST-008"} and isinstance(value, (int, float)):
@@ -1385,6 +1426,14 @@ class ReportContextBuilder:
 
     def _display_value_for_detail(self, key: str, value: Any, item: dict[str, Any] | None = None) -> str:
         rule_id = item.get("rule_id", "") if item else ""
+        if rule_id in {"VSL-VC-006", "VSL-HOST-023"} and key in {"current_value", "license_days_remaining", "host_license_expiration_days"}:
+            from vstacklens.reports.license_evidence import expiry_label
+            return expiry_label(item.get("observed_detail") or {}, item.get("object_type") == "HostSystem", item.get("object_key"))
+        if rule_id in {"VSL-VC-006", "VSL-HOST-023"} and key in {"license_expiration_date", "host_license_expiration_date"} and str(value).strip().casefold() in {"never", "perpetual", "永久授权"}:
+            from vstacklens.collection.license_state import verified_state
+            state = verified_state(item.get("observed_detail") or {}, item.get("object_type") == "HostSystem", item.get("object_key"))
+            if state.get("expiration_state") != "perpetual":
+                return "到期状态无法确认（历史标注缺少源依据）"
         if key in {"current_value", "expected_value"}:
             semantic_key = self._semantic_key_for_item(item or {}, key)
             if semantic_key:
@@ -1448,7 +1497,7 @@ class ReportContextBuilder:
                 return f"剩余 {number} 天"
             if hint_type == "license_days" and isinstance(value, (int, float)):
                 if value >= 999999:
-                    return "永久授权"
+                    return "到期状态无法确认（历史数值缺少永久依据）"
                 number = int(value) if float(value).is_integer() else value
                 return f"剩余 {number} 天"
             if hint_type == "assigned" and isinstance(value, bool):
@@ -1566,7 +1615,7 @@ class ReportContextBuilder:
             return f"剩余 {self._format_number(value)} 天"
         if hint_type == "license_days" and isinstance(value, (int, float)):
             if value >= 999999:
-                return "永久授权"
+                return "到期状态无法确认（历史数值缺少永久依据）"
             return f"剩余 {self._format_number(value)} 天"
         if hint_type == "assigned" and isinstance(value, bool):
             return "已分配" if value else "未分配"

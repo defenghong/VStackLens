@@ -20,8 +20,11 @@ class PdfReaderDialog(QDialog):
 
     def __init__(self, pdf_path: Path, parent=None) -> None:
         super().__init__(parent)
+        self._closing = False
         self.pdf_path = Path(pdf_path)
-        self.document = pymupdf.open(self.pdf_path)
+        # Python can read extended Windows paths that MuPDF's filename API may
+        # reject. Keep the selected path for display; parse the file in memory.
+        self.document = pymupdf.open(stream=self.pdf_path.read_bytes(), filetype="pdf")
         if self.document.page_count < 1:
             self.document.close()
             raise ValueError("PDF 报告没有可显示的页面。")
@@ -59,14 +62,20 @@ class PdfReaderDialog(QDialog):
         self._render_page()
 
     def _change_page(self, offset: int) -> None:
+        if self._closing or self.document.is_closed:
+            return
         self.page_index = min(max(self.page_index + offset, 0), self.document.page_count - 1)
         self._render_page()
 
     def _change_zoom(self, delta: float) -> None:
+        if self._closing or self.document.is_closed:
+            return
         self.zoom = min(max(self.zoom + delta, 0.65), 2.5)
         self._render_page()
 
     def _render_page(self) -> None:
+        if self._closing or self.document.is_closed:
+            return
         page = self.document.load_page(self.page_index)
         pixmap = page.get_pixmap(matrix=pymupdf.Matrix(self.zoom, self.zoom), alpha=False)
         image = QImage(
@@ -85,5 +94,8 @@ class PdfReaderDialog(QDialog):
         self.scroll_area.horizontalScrollBar().setValue(0)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
-        self.document.close()
+        self._closing = True
+        document = getattr(self, "document", None)
+        if document is not None and not document.is_closed:
+            document.close()
         super().closeEvent(event)

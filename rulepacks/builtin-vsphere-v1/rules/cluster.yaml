@@ -107,6 +107,7 @@ rules:
       required: false
   condition:
     type: safe_expression
+    not_applicable_when: ha_enabled == False
     fail_when: ha_enabled == True and admission_control_enabled == False
     pass_when: ha_enabled == False or admission_control_enabled == True
   severity_policy:
@@ -271,6 +272,7 @@ rules:
       required: false
   condition:
     type: safe_expression
+    not_applicable_when: drs_enabled == False
     fail_when: drs_enabled == True and drs_behavior == 'manual'
     pass_when: drs_enabled == False or drs_behavior != 'manual'
   severity_policy:

@@ -32,6 +32,7 @@ datas = [
     (str(source_root / "vstacklens" / "reports" / "templates"), "vstacklens/reports/templates"),
     (str(source_root / "vstacklens" / "assets"), "vstacklens/assets"),
     (str(typst_executable), "vstacklens/tools"),
+    (str(project_root / "src" / "vstacklens" / "tools" / "typst-runtime.json"), "vstacklens/tools"),
     (str(typst_root / "LICENSE"), "vstacklens/tools"),
     (str(typst_root / "NOTICE"), "vstacklens/tools"),
     (str(project_root / "rulepacks"), "rulepacks"),

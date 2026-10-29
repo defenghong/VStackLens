@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from vstacklens.reports.license_evidence import license_summary
+
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import re
 from typing import Any
@@ -15,7 +18,10 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Inches, Pt, RGBColor, Twips
 
 from vstacklens.reports.report_model import FindingItem, ReportData
-from vstacklens.reports.presentation import count_excluded_powered_off_vms, powered_off_exclusion_note
+from vstacklens.reports.presentation import count_excluded_powered_off_vms, powered_off_exclusion_note, delivery_overview
+from vstacklens.reports.customer_format import (
+    CAPACITY_NOTE, capacity_bytes_text, capacity_text, capacity_unit, local_time_text, percent_text,
+)
 
 
 LEVEL_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
@@ -37,6 +43,7 @@ CLUSTER_FEATURE_WIDTHS_DXA = [4762, 4763]
 NETWORK_LINK_WIDTHS_DXA = [1500, 900, 1400, 1150, 1850, 2725]
 VMOTION_WIDTHS_DXA = [2382, 2381, 2381, 2381]
 GENERIC_3_COL_WIDTHS_DXA = [3175, 3175, 3175]
+CUSTOMER_BASIS_WIDTHS_DXA = [2300, 2300, 4925]
 FALLBACK_DETAIL_WIDTHS_DXA = [2500, 3300, 3725]
 ISO_DETAIL_WIDTHS_DXA = [3175, 6350]
 PORTGROUP_SECURITY_WIDTHS_DXA = [1531, 2268, 1531, 1531, 2664]
@@ -56,7 +63,7 @@ LONG_TEXT_HEADER_KEYWORDS = (
     "告警内容",
     "UserAgent",
     "趋势判断",
-    "ISO镜像",
+    "ISO 镜像",
     "所在位置",
     "vSwitch或端口组",
     "关联集群",
@@ -67,7 +74,7 @@ LONG_TEXT_HEADER_KEYWORDS = (
 )
 LONG_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{15,}")
 WORD_BREAK = "\u200b"
-TABLE_DATA_FONT_SIZE = 8.5
+TABLE_DATA_FONT_SIZE = 10
 MAX_SUMMARY_ROWS = 20
 
 RISK_CATEGORY_ORDER = ["vCenter", "集群", "主机", "网络", "存储", "虚拟机"]
@@ -109,7 +116,6 @@ CUSTOMER_WORD_REPLACEMENTS = {
     "Memory Limit": "内存资源限制",
     "memory limit": "内存资源限制",
     "期望值": "建议状态",
-    "当前值": "当前状态",
     "期望：": "建议：",
     "失败": "未通过",
 }
@@ -146,112 +152,177 @@ class DocxReportEngine:
     """Render the customer-facing Word V2 report."""
 
     def render(self, report: ReportData, output_path: Path) -> Path:
+        if not report.product_modules:
+            from vstacklens.reports.document_word import render_document_word
+            return render_document_word(self, report, output_path)
+        self._customer_mode = not bool(report.product_modules)
+        self._active_problem_views = {}
+        self._capacity_note_root = None
+        from vstacklens.products.reporting import ensure_report_has_valid_data, has_legacy_sections
+        ensure_report_has_valid_data(report)
+        if report.product_modules and not has_legacy_sections(report):
+            return self._render_product_report(report, output_path)
+        from vstacklens.products.reporting import legacy_assessment_reports
+        assessments = legacy_assessment_reports(report)
+        if len(assessments) <= 1:
+            from vstacklens.reports.customer_caliber import ensure_report
+            ensure_report(report)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         document = Document()
         self._setup_document(document)
-        risk_groups = self._aggregate_risks(report)
+        risk_groups = self._aggregate_risks(report) if len(assessments) <= 1 else []
         customer_risk_groups = self._customer_visible_risk_groups(risk_groups)
 
-        self._cover(document, report)
-        self._table_of_contents(document)
-        self._executive_summary(document, report, customer_risk_groups)
-        self._asset_overview(document, report)
-        self._risk_recommendations(document, report, customer_risk_groups)
-        vsan_status = (report.vsan_summary or {}).get("status")
-        vsan_visible = bool(vsan_status and vsan_status != "not_applicable")
-        if vsan_visible:
-            self._vsan_section(document, report)
-        self._follow_up(document, customer_risk_groups, section_number=5 if vsan_visible else 4)
-        self._appendix(document, report, section_number=6 if vsan_visible else 5)
+        if report.product_modules:
+            self._product_opening(document, report)
+        else:
+            self._cover(document, report)
+        self._table_of_contents(document, report)
+        if len(assessments) > 1:
+            for metadata, original in assessments:
+                self._add_heading(document, f"VC／vSAN 专项 {metadata['target_name']}", 1)
+                document.paragraphs[-1].paragraph_format.page_break_before = True
+                document.paragraphs[-1].paragraph_format.keep_with_next = True
+                self._add_paragraph(document, f"目标 ID：{metadata['target_id']}；原任务：{metadata['legacy_run_id']}；原始结论：{original.health_score.label}")
+                document.paragraphs[-1].paragraph_format.keep_with_next = True
+                original_groups = self._customer_visible_risk_groups(self._aggregate_risks(original))
+                self._executive_summary(document, original, original_groups, start_new_page=False)
+                self._risk_recommendations(document, original, original_groups)
+                self._asset_overview(document, original)
+                if (original.vsan_summary or {}).get("status") not in (None, "not_applicable"):
+                    self._vsan_section(document, original)
+                self._appendix(document, original)
+            vsan_visible = False
+        else:
+            if report.product_modules:
+                name = assessments[0][0]["target_name"] if assessments else report.customer_info.vcenter
+                self._add_heading(document, f"VC／vSAN 专项 {name}", 1)
+                document.paragraphs[-1].paragraph_format.page_break_before = True
+                document.paragraphs[-1].paragraph_format.keep_with_next = True
+            self._executive_summary(document, report, customer_risk_groups, start_new_page=not bool(report.product_modules))
+            self._risk_recommendations(document, report, customer_risk_groups)
+            self._asset_overview(document, report)
+            vsan_status = (report.vsan_summary or {}).get("status")
+            vsan_visible = bool(vsan_status and vsan_status != "not_applicable")
+            if vsan_visible:
+                self._vsan_section(document, report)
+        if report.product_modules:
+            self._product_sections(document, report)
+        if len(assessments) <= 1:
+            self._follow_up(document, customer_risk_groups, report=report, section_number=5 if vsan_visible else 4)
+        if len(assessments) <= 1:
+            self._appendix(document, report, section_number=6 if vsan_visible else 5)
 
-        document.save(output_path)
+        from vstacklens.application.artifact_publish import staged_file
+        from vstacklens.reports.product_evidence import staged_product_file
+        stage_context = (staged_product_file(report, output_path, overwrite=False)
+                         if report.product_modules else staged_file(output_path))
+        with stage_context as stage:
+            document.save(stage)
         return output_path
 
+    def _render_product_report(self, report: ReportData, output_path: Path) -> Path:
+        document = Document()
+        self._setup_document(document)
+        self._product_opening(document, report)
+        self._product_sections(document, report)
+        from vstacklens.reports.product_evidence import staged_product_file
+        with staged_product_file(report, output_path, overwrite=False) as stage:
+            document.save(stage)
+        return output_path
+
+    def _product_opening(self, document: Document, report: ReportData) -> None:
+        previous = getattr(self, "_product_text", False)
+        self._product_text = True
+        try:
+            self._write_product_opening(document, report)
+        finally:
+            self._product_text = previous
+
+    def _write_product_opening(self, document: Document, report: ReportData) -> None:
+        from vstacklens.products.reporting import product_report_view
+        view = product_report_view(report)
+        label = report.report_info.report_title
+        # Balance long CJK titles at the existing size rather than leaving one
+        # final glyph alone or shrinking the report typography.
+        weight = sum(1 if ord(ch) < 128 else 2 for ch in label)
+        if weight > 38:
+            count = (weight + 37) // 38
+            target = weight / count
+            chunks, current, consumed = [], "", 0
+            for index, ch in enumerate(label):
+                current += ch; consumed += 1 if ord(ch) < 128 else 2
+                in_word = index + 1 < len(label) and ch.isascii() and ch.isalnum() and label[index + 1].isascii() and label[index + 1].isalnum()
+                if consumed >= target and len(chunks) < count - 1 and not in_word:
+                    chunks.append(current); current = ""; consumed = 0
+            if current: chunks.append(current)
+            label = "\n".join(chunks)
+        title = document.add_paragraph(label, style="Title")
+        for element in (document.styles["Title"].element, title._p):
+            for border in element.xpath(".//w:pBdr"):
+                border.getparent().remove(border)
+        for run in title.runs:
+            self._format_run(run, size=25, bold=True, color=RGBColor(0, 0, 0))
+        self._add_paragraph(document, f"客户：{view['customer']}　站点：{view['site']}")
+        self._add_paragraph(document, f"任务：{view['run_id']}　生成时间：{view['generated_at']}")
+        self._add_heading(document, "巡检范围与总体说明", 1)
+        self._add_paragraph(document, f"范围：{view['scope']}。{view['summary']}")
+        self._add_paragraph(document, "按产品展示状态、证据与限制，不计算跨产品健康分数。")
+        self._add_table(document, ["产品与目标", "执行状态", "检查限制"], [
+            [f"{target['product_name']} {target['name']}\n{target['address']}",
+             f"采集：{target['collection']}\n分析：{target['analysis']}\n{target['delivery']}", target["limits"]]
+            for target in view["targets"]
+        ], widths=[2500, 2500, 4525], context_title="本次选定目标与检查范围")
+        for limitation in view["limitations"]:
+            self._add_paragraph(document, limitation)
+
+    def _product_sections(self, document: Document, report: ReportData) -> None:
+        previous = getattr(self, "_product_text", False)
+        self._product_text = True
+        try:
+            self._write_product_sections(document, report)
+        finally:
+            self._product_text = previous
+
+    def _write_product_sections(self, document: Document, report: ReportData) -> None:
+        from vstacklens.products.reporting import product_report_view
+        view = product_report_view(report)
+        if view["deduplication"]:
+            self._add_paragraph(document, view["deduplication"])
+        if view["conflicts"]:
+            self._add_paragraph(document, f"本次存在 {len(view['conflicts'])} 组差异记录，全部保留，需核查。")
+        for module in view["sections"]:
+            self._add_heading(document, f"{module['product_name']} 专项 {module['name']}", 1)
+            self._add_paragraph(document, f"目标：{module['address']}；版本：{module['version']}；Build：{module['build']}")
+            self._add_paragraph(document, f"采集时间说明：{module['time']}；逐来源时间见工程证据。")
+            self._add_paragraph(document, module["security"])
+            body = module["body"]
+            self._add_paragraph(document, body["conclusion"])
+            if body["empty_business_text"]:
+                self._add_paragraph(document, body["empty_business_text"])
+            for item in body["tables"]:
+                self._add_heading(document, item["title"], 2)
+                weights = item["weights"]
+                widths = [int(TABLE_TOTAL_WIDTH_DXA * weight / sum(weights)) for weight in weights]
+                widths[-1] = TABLE_TOTAL_WIDTH_DXA - sum(widths[:-1])
+                minimums = {i: minimum for i, header in enumerate(item["columns"])
+                            if (minimum := {"证据": 2150, "原生级别": 1200, "采样值与单位": 1600}.get(header))}
+                locked = {i: max(widths[i], minimum) for i, minimum in minimums.items()}
+                free = [i for i in range(len(widths)) if i not in locked]
+                if locked and free:
+                    scale = (TABLE_TOTAL_WIDTH_DXA - sum(locked.values())) / sum(widths[i] for i in free)
+                    widths = [locked[i] if i in locked else int(widths[i] * scale) for i in range(len(widths))]
+                    widths[free[0]] += TABLE_TOTAL_WIDTH_DXA - sum(widths)
+                self._add_table(document, item["columns"], item["rows"], widths=widths,
+                                context_title=f"{module['product_name']} {item['title']}")
+        self._add_heading(document, "统一检查限制与工程证据", 1)
+        for item in view["constraints"]:
+            self._add_paragraph(document, f"{item['title']}：{item['text']}")
+        self._add_paragraph(document, f"工程附件：{view['evidence_filename']}。正文 E 编号对应附件 record_index；完整原始字段、内部标识、取数来源及精确采集时间均在附件中保留。")
+
     def _customer_visible_risk_groups(self, risk_groups: list[RiskGroup]) -> list[RiskGroup]:
-        base_groups = [group for group in risk_groups if group.level in {"P1", "P2", "P3"}]
-        syslog_hosts = {
-            self._object_key(finding.object_name)
-            for group in base_groups
-            if self._is_remote_syslog_group(group)
-            for finding in group.findings
-        }
-        visible_groups: list[RiskGroup] = []
+        return risk_groups
 
-        for group in base_groups:
-            findings = [finding for finding in group.findings if not self._is_default_vm_finding(finding)]
-            if not findings:
-                continue
-
-            candidate = RiskGroup(
-                level=self._risk_level_for_findings(findings, group.level),
-                category=group.category,
-                title=self._clean(group.title),
-                findings=findings,
-                rule_id=group.rule_id,
-            )
-            if self._is_tools_group(candidate) or self._is_syslog_group(candidate):
-                continue
-
-            if self._is_log_core_dump_group(candidate) and syslog_hosts:
-                findings = [finding for finding in findings if self._object_key(finding.object_name) not in syslog_hosts]
-                if not findings:
-                    continue
-                candidate = RiskGroup(
-                    level=self._risk_level_for_findings(findings, candidate.level),
-                    category=candidate.category,
-                    title=candidate.title,
-                    findings=findings,
-                    rule_id=candidate.rule_id,
-                )
-            visible_groups.append(candidate)
-
-        return self._merge_snapshot_risk_groups(visible_groups)
-
-    def _merge_snapshot_risk_groups(self, groups: list[RiskGroup]) -> list[RiskGroup]:
-        snapshot_rule_ids = {"VSL-VM-001", "VSL-VM-007"}
-        snapshot_groups = [group for group in groups if group.rule_id in snapshot_rule_ids]
-        other_groups = [group for group in groups if group.rule_id not in snapshot_rule_ids]
-        if not snapshot_groups:
-            return sorted(groups, key=self._risk_group_sort_key)
-
-        unique_findings: dict[str, FindingItem] = {}
-        for group in snapshot_groups:
-            for finding in group.findings:
-                key = self._object_key(finding.object_name or finding.object_path)
-                if not key:
-                    continue
-                existing = unique_findings.get(key)
-                if existing is None or LEVEL_ORDER.get(finding.risk_level.upper(), 99) < LEVEL_ORDER.get(existing.risk_level.upper(), 99):
-                    unique_findings[key] = finding
-
-        level = min(
-            (group.level for group in snapshot_groups),
-            key=lambda value: LEVEL_ORDER.get(value, 99),
-            default="P3",
-        )
-        impact = "超期快照或过深快照链可能影响业务性能、备份稳定性和虚拟机维护"
-        merged_findings = [
-            finding.model_copy(update={
-                "risk_level": level,
-                "title": "虚拟机存在快照",
-                "rule_name": "虚拟机存在快照",
-                "business_impact": impact,
-                "consequence": impact,
-            })
-            for finding in sorted(unique_findings.values(), key=lambda item: item.object_name.casefold())
-        ]
-        if not merged_findings:
-            return sorted(other_groups, key=self._risk_group_sort_key)
-        other_groups.append(
-            RiskGroup(
-                level=level,
-                category="虚拟机",
-                title="虚拟机存在快照",
-                findings=merged_findings,
-                rule_id="VSL-VM-SNAPSHOT-MERGED",
-            )
-        )
-        return sorted(other_groups, key=self._risk_group_sort_key)
 
     def _risk_level_for_findings(self, findings: list[FindingItem], default: str = "P3") -> str:
         levels = [finding.risk_level.upper() for finding in findings if finding.risk_level.upper() in LEVEL_ORDER]
@@ -328,25 +399,6 @@ class DocxReportEngine:
             parts.extend(finding.remediation_steps or [])
         return " ".join(self._clean(part) for part in parts)
 
-    def _merged_tools_group(self, findings: list[FindingItem]) -> RiskGroup | None:
-        if not findings:
-            return None
-        by_vm: dict[str, FindingItem] = {}
-        for finding in findings:
-            key = self._object_key(finding.object_name)
-            existing = by_vm.get(key)
-            if existing is None or self._tools_priority(finding) < self._tools_priority(existing):
-                by_vm[key] = finding
-        merged = sorted(by_vm.values(), key=lambda finding: self._clean(finding.object_name))
-        has_uninstalled = any(self._tools_priority(finding) == 0 for finding in merged)
-        title = "虚拟机未安装 VMware Tools" if has_uninstalled else "虚拟机 VMware Tools 需安装或修复"
-        return RiskGroup(
-            level=self._risk_level_for_findings(merged, "P3"),
-            category="虚拟机",
-            title=title,
-            findings=merged,
-            rule_id="VMWARE-TOOLS",
-        )
 
     def _tools_priority(self, finding: FindingItem) -> int:
         text = self._clean(
@@ -374,6 +426,8 @@ class DocxReportEngine:
 
     def _setup_document(self, document: Document) -> None:
         section = document.sections[0]
+        section.page_width = Cm(21)
+        section.page_height = Cm(29.7)
         section.top_margin = Cm(1.8)
         section.bottom_margin = Cm(1.8)
         section.left_margin = Cm(2.0)
@@ -398,9 +452,18 @@ class DocxReportEngine:
             update_fields = OxmlElement("w:updateFields")
             update_fields.set(qn("w:val"), "true")
             settings.append(update_fields)
+        for name in ("Heading 1", "Heading 2", "Heading 3", "Heading 4"):
+            styles[name].paragraph_format.keep_with_next = True
+        footer = document.sections[0].footer.paragraphs[0]
+        footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        footer.add_run("VStackLens · 第 ")
+        page_field = OxmlElement("w:fldSimple"); page_field.set(qn("w:instr"), "PAGE")
+        footer._p.append(page_field); footer.add_run(" 页")
 
     def _cover(self, document: Document, report: ReportData) -> None:
-        for _ in range(4):
+        from vstacklens.reports.customer_view import customer_join_nonempty
+
+        for _ in range(1):
             document.add_paragraph()
         customer = self._clean(report.customer_info.customer_name or "未指定客户")
         vcenter = self._clean(report.customer_info.vcenter or "未指定 vCenter")
@@ -414,7 +477,7 @@ class DocxReportEngine:
         title = document.add_paragraph()
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         title.paragraph_format.space_before = Pt(18)
-        title_run = title.add_run("vSphere 环境健康巡检报告")
+        title_run = title.add_run(report.report_info.report_title if report.product_modules else "vSphere 环境健康巡检报告")
         self._format_run(title_run, size=28, bold=True, color=RGBColor(31, 78, 121))
 
         date = document.add_paragraph()
@@ -429,7 +492,7 @@ class DocxReportEngine:
         target_run = target.add_run(f"检查对象：vCenter {vcenter}")
         self._format_run(target_run, size=12, bold=False, color=RGBColor(80, 80, 80))
 
-        for _ in range(4):
+        for _ in range(1):
             document.add_paragraph()
 
         summary_title = document.add_paragraph()
@@ -442,11 +505,19 @@ class DocxReportEngine:
         summary.paragraph_format.line_spacing = 1.25
         summary_run = summary.add_run(f"基于当前巡检数据，对 vCenter 环境 {vcenter} 的平台配置、运行状态、容量、可用性和建议关注事项进行汇总。")
         self._format_run(summary_run, size=12)
-        document.add_page_break()
+        opening = delivery_overview(report)
+        self._add_paragraph(document, "环境与范围：" + customer_join_nonempty([opening['environment'], opening['scope']]))
+        self._add_paragraph(document, f"总体结论：{opening['conclusion']}。{opening['explanation']}")
+        for item in opening["priorities"]:
+            title = self._display_title(report, RiskGroup(item['level'], "", item['title'], [])) if getattr(report, "customer_caliber", None) else item['title']
+            self._add_paragraph(document, customer_join_nonempty([item['level'], title, f"{item['objects']} 个对象"]))
+        for limitation in opening["limitations"]:
+            self._add_paragraph(document, limitation)
 
-    def _table_of_contents(self, document: Document) -> None:
+    def _table_of_contents(self, document: Document, report: ReportData | None = None) -> None:
         title = document.add_paragraph()
         title.style = "Title"
+        title.paragraph_format.page_break_before = True
         title.alignment = WD_ALIGN_PARAGRAPH.LEFT
         title_run = title.add_run("目录")
         self._format_run(title_run, size=16, bold=True, color=RGBColor(31, 78, 121))
@@ -461,7 +532,7 @@ class DocxReportEngine:
         fld_begin.set(qn("w:fldCharType"), "begin")
         instr = OxmlElement("w:instrText")
         instr.set(qn("xml:space"), "preserve")
-        instr.text = 'TOC \\o "1-3" \\h \\z \\u'
+        instr.text = 'TOC \\o "1-2" \\h \\z \\u'
         fld_sep = OxmlElement("w:fldChar")
         fld_sep.set(qn("w:fldCharType"), "separate")
         fld_end = OxmlElement("w:fldChar")
@@ -469,14 +540,29 @@ class DocxReportEngine:
         run._r.append(fld_begin)
         run._r.append(instr)
         run._r.append(fld_sep)
-        placeholder = toc.add_run("打开文档后可在 Word 中刷新此目录。")
+        has_vsan = bool(report and (report.vsan_summary or {}).get("status") not in (None, "not_applicable"))
+        chapters = ["1. 执行摘要", "2. 问题与整改建议", "3. VMware 巡检"]
+        if has_vsan: chapters.append("4. vSAN 专项巡检")
+        chapters += [f"{5 if has_vsan else 4}. 后续处理建议", f"{6 if has_vsan else 5}. 环境资产与对象清单"]
+        if report and report.product_modules:
+            from vstacklens.products.reporting import product_report_view
+            scope = product_report_view(report)
+            chapters = ["巡检范围与总体说明"]
+            chapters += [f"{target['product_name']} 专项 {target['name']}" for target in scope["targets"]]
+            chapters.append("各专项的判断依据 检查限制与对象明细")
+        placeholder = toc.add_run("\n".join(chapters))
         self._format_run(placeholder, size=10.5, color=RGBColor(90, 90, 90))
         toc.add_run()._r.append(fld_end)
-        document.add_page_break()
 
-    def _executive_summary(self, document: Document, report: ReportData, risk_groups: list[RiskGroup]) -> None:
+    def _executive_summary(self, document: Document, report: ReportData, risk_groups: list[RiskGroup], *, start_new_page: bool = True) -> None:
+        from vstacklens.reports.presentation import customer_check_statistics
+
         self._add_heading(document, "1. 执行摘要", 1)
+        document.paragraphs[-1].paragraph_format.page_break_before = start_new_page
         self._add_paragraph(document, f"环境健康状态：{report.health_score.label}。{report.health_score.explanation}")
+        statistics = customer_check_statistics(report)
+        if statistics.get("text"):
+            self._add_paragraph(document, statistics["text"])
         self._add_heading(document, "1.1 巡检报告概述", 2)
         self._add_paragraph(
             document,
@@ -501,7 +587,7 @@ class DocxReportEngine:
         summary = self._asset_summary(report)
         self._add_table(
             document,
-            ["vCenter", "数据中心", "集群", "ESXi 主机", "共享/业务 Datastore", "虚拟机"],
+            ["vCenter", "数据中心", "集群", "ESXi 主机", "数据存储", "虚拟机"],
             [
                 [
                     summary.get("vCenter", 0),
@@ -515,29 +601,29 @@ class DocxReportEngine:
             widths=OBJECT_OVERVIEW_WIDTHS_DXA,
             align_center_columns={0, 1, 2, 3, 4, 5},
         )
+        facts = self._display_facts(report)
+        if facts["snapshots"].get("overview_label"):
+            self._add_paragraph(document, facts["snapshots"]["overview_label"])
 
         self._add_heading(document, "1.4 重点问题", 2)
-        counts = self._risk_counts(report, risk_groups)
-        detail_counts = self._finding_counts(risk_groups)
-        total = sum(counts.values())
-        detail_total = sum(detail_counts.values())
+        counts = facts["counts"]
         self._add_paragraph(
             document,
             (
-                f"本次 vSphere 环境健康检查共识别 {total} 类建议关注问题，涉及 {detail_total} 条对象明细。"
-                f"按问题类型统计：P1 {counts['P1']} 类、P2 {counts['P2']} 类、P3 {counts['P3']} 类。"
-                f"按影响对象明细统计：P1 {detail_counts['P1']} 条、P2 {detail_counts['P2']} 条、P3 {detail_counts['P3']} 条。"
-                "以下按问题类型汇总展示，Word 正文仅保留代表性对象明细，完整对象清单建议在 HTML 报告中查看。"
+                f"{counts['problem_label']}：{counts['problem_count']} 类；"
+                f"{counts['affected_label']}：{counts['affected_total']} 个。"
+                "以下按问题类型汇总，具体对象见各问题明细。"
             ),
         )
-        rows = self._summary_rows(risk_groups)
+        rows = self._summary_rows(risk_groups, report=report)
         self._add_heading(document, "建议关注问题分类", 3)
-        self._add_issue_summary_table(document, rows[:MAX_SUMMARY_ROWS])
-        if len(rows) > MAX_SUMMARY_ROWS:
-            self._add_paragraph(document, "其余建议关注事项请参见后续风险与建议章节。")
+        self._add_issue_summary_table(document, rows)
+        for limitation in delivery_overview(report)["limitations"]:
+            self._add_paragraph(document, limitation)
 
-        self._add_heading(document, "1.5 巡检结论", 2)
-        self._resource_change_summary(document, report)
+        if report.history_visible:
+            self._add_heading(document, "1.5 巡检结论", 2)
+            self._resource_change_summary(document, report)
 
     def _asset_overview(self, document: Document, report: ReportData) -> None:
         self._add_heading(document, "3. VMware 巡检", 1)
@@ -550,11 +636,17 @@ class DocxReportEngine:
                     item.get("object_name", ""),
                     self._fmt(props.get("version")),
                     self._fmt(props.get("build")),
-                    "已连接" if props.get("connected") is not False else "未连接",
+                    self._boolean_label(props.get("connected"), "已连接", "未连接"),
                 ]
             )
         if vcenter_rows:
             self._add_table(document, ["名称", "版本", "Build", "连接状态"], vcenter_rows, widths=VCENTER_WIDTHS_DXA)
+        sessions = [finding for finding in report.findings if (self._observed(finding).get("idle_sessions") or self._observed(finding).get("sessions"))]
+        if sessions:
+            has_any = True
+            headers, rows = self._idle_session_table(RiskGroup("", "vCenter", "空闲会话", sessions, ""))
+            self._add_paragraph(document, "空闲会话（环境状态，不计入问题数）")
+            self._add_table(document, headers, rows, widths=self._detail_widths(headers))
         clusters = self._asset_details(report, "ClusterComputeResource")
         if clusters:
             self._add_table(
@@ -602,6 +694,11 @@ class DocxReportEngine:
         stores = self._asset_details(report, "Datastore")
         self._add_heading(document, "3.3 存储使用情况", 2)
         if stores:
+            capacities = [(item.get("properties") or {}).get("datastore_capacity_gb") for item in stores]
+            has_capacity = any(capacity_text(value) for value in capacities)
+            if has_capacity:
+                self._add_capacity_note(document)
+            unit = capacity_unit(capacities)
             rows = []
             for item in sorted(stores, key=lambda row: self._safe_float_sort_key((row.get("properties") or {}).get("used_percent")), reverse=True):
                 props = item.get("properties") or {}
@@ -609,19 +706,20 @@ class DocxReportEngine:
                     [
                         item.get("object_name", ""),
                         self._fmt(props.get("datastore_filesystem_type")),
+                        *([self._gb_size_label(props.get("datastore_capacity_gb"), unit=unit)] if has_capacity else []),
                         self._fmt_percent(props.get("used_percent")),
                         self._fmt_percent(props.get("free_percent")),
-                        "可访问" if props.get("accessible") is not False else "不可访问",
+                        self._boolean_label(props.get("accessible"), "可访问", "不可访问"),
                     ]
                 )
             self._add_table(
                 document,
-                ["Datastore", "类型", "已用", "剩余", "状态"],
+                ["Datastore", "类型", *(["总容量"] if has_capacity else []), "已用", "剩余", "状态"],
                 rows,
-                widths=GENERIC_5_COL_WIDTHS_DXA,
+                widths=[2500, 1000, 1700, 1300, 1300, 1725] if has_capacity else GENERIC_5_COL_WIDTHS_DXA,
             )
         else:
-            self._add_paragraph(document, "本次未采集到 Datastore 容量数据。")
+            self._add_paragraph(document, "本次未采集到数据存储容量数据。")
 
         self._add_heading(document, "3.4 版本、证书与授权状态", 2)
         version_rows = self._version_certificate_license_rows(report)
@@ -633,6 +731,8 @@ class DocxReportEngine:
         )
 
     def _risk_recommendations(self, document: Document, report: ReportData, risk_groups: list[RiskGroup]) -> None:
+        from vstacklens.reports.customer_view import customer_join_nonempty
+
         self._add_heading(document, "2. 问题与整改建议", 1)
 
         by_level: dict[str, list[RiskGroup]] = defaultdict(list)
@@ -656,15 +756,31 @@ class DocxReportEngine:
                 category_number = f"{section_number}.{category_index}"
                 self._add_heading(document, f"{category_number} {category}", 3)
                 for item_index, group in enumerate(sorted(items, key=self._risk_group_sort_key), start=1):
-                    self._add_heading(document, f"{category_number}.{item_index} {group.title}", 4)
+                    display_title = self._display_title(report, group)
+                    self._add_heading(document, f"{category_number}.{item_index} {display_title}", 4)
                     self._add_risk_sentence(document, group, report)
                     table = self._detail_table(report, group)
                     if table:
                         headers, rows = table
-                        self._add_table(document, headers, rows, widths=self._detail_widths(headers))
+                        # A group's identical recommendation is already stated above it.
+                        repeated = [] if self._shared_problem(report, group) else [i for i, h in enumerate(headers) if h in {"建议", "建议处理", "建议动作"} and rows and len({str(r[i]) for r in rows}) == 1]
+                        if repeated:
+                            headers = [h for i, h in enumerate(headers) if i not in repeated]
+                            rows = [[v for i, v in enumerate(r) if i not in repeated] for r in rows]
+                        levels = {finding.object_name: finding.risk_level for finding in group.findings}
+                        rows = [[f"{value}（{levels[str(value)]}）" if index == 0 and str(value) in levels else value for index, value in enumerate(row)] for row in rows]
+                        self._literal_customer_table = True
+                        try:
+                            self._add_table(document, headers, rows, widths=self._detail_widths(headers),
+                                context_title=customer_join_nonempty([group.level, display_title, "对象明细/续表"]))
+                            shared = self._shared_problem(report, group)
+                            for note in (shared or {}).get("table_notes", []):
+                                self._add_paragraph(document, note)
+                        finally:
+                            self._literal_customer_table = False
                 category_index += 1
 
-    def _follow_up(self, document: Document, risk_groups: list[RiskGroup], *, section_number: int = 5) -> None:
+    def _follow_up(self, document: Document, risk_groups: list[RiskGroup], *, report: ReportData | None = None, section_number: int = 5) -> None:
         self._add_heading(document, f"{section_number}. 后续处理建议", 1)
         priority = [group for group in risk_groups if group.level in {"P1", "P2"}]
         planned = [group for group in risk_groups if group.level == "P3"]
@@ -672,73 +788,79 @@ class DocxReportEngine:
         self._add_heading(document, f"{section_number}.1 建议优先确认", 2)
         self._add_bullets(
             document,
-            self._suggestions(priority, "建议优先确认", "结合影响范围和变更窗口安排后续动作。"),
+            self._suggestions(priority, "建议优先确认", "结合影响范围和变更窗口安排后续动作。", report=report),
             empty_text="当前未识别 P1/P2 等级建议关注事项，建议保持定期复核。",
         )
 
         self._add_heading(document, f"{section_number}.2 建议计划优化", 2)
         self._add_bullets(
             document,
-            self._suggestions(planned, "建议计划优化", "纳入近期运维优化计划。"),
+            self._suggestions(planned, "建议计划优化", "纳入近期运维优化计划。", report=report),
             empty_text="当前未识别 P3 等级建议关注事项，建议结合日常运维持续观察。",
         )
 
     def _vsan_section(self, document: Document, report: ReportData) -> None:
-        summary = report.vsan_summary or {}
+        from vstacklens.reports.customer_view import customer_vsan_summary
+        summary = customer_vsan_summary(report)
         if summary.get("status") == "not_applicable":
             return
+        facts = self._display_facts(report)["vsan"]
+        items = {item["key"]: item for item in facts["items"]}
         self._add_heading(document, "4. vSAN 专项巡检", 1)
-        status = str(summary.get("status") or "unknown")
-        status_label = {"collected": "已采集", "unavailable": "部分采集", "unknown": "未确认", "not_applicable": "不适用"}.get(status, status)
-        self._add_paragraph(document, f"vSAN 采集状态：{status_label}；架构：{summary.get('architecture') or '未采集'}；集群：{', '.join(summary.get('clusters') or []) or '未采集'}。")
-        self._add_paragraph(document, "判定说明：采集成功且异常计数为 0，表示本次采集时点未发现该项异常；存在异常时说明影响和建议；未取得或未确认的数据不按正常处理。")
-        self._add_paragraph(document, self._vsan_overall_judgement(summary))
+        if facts.get("summary"):
+            self._add_paragraph(document, facts["summary"])
 
         self._add_heading(document, "4.1 集群健康", 2)
-        self._add_paragraph(document, self._vsan_category_line(summary, "VSAN-CLUSTER-HEALTH"))
-        self._add_paragraph(document, self._vsan_health_judgement(summary))
-        self._add_table(document, ["项目", "结果"], [["总体 Health", status_label], ["健康异常", self._fmt(summary.get("health_issue_count"))], ["对象异常", self._fmt(summary.get("object_issue_count"))]], widths=CLUSTER_FEATURE_WIDTHS_DXA)
+        health_rows = [[label, self._fmt(summary[key])] for key, label in
+                       [("health_issue_count", "健康异常"), ("object_issue_count", "对象异常")]
+                       if summary.get(key) is not None]
+        self._add_table(document, ["项目", "结果"], health_rows, widths=CLUSTER_FEATURE_WIDTHS_DXA)
 
         self._add_heading(document, "4.2 磁盘与磁盘组", 2)
-        self._add_paragraph(document, self._vsan_category_line(summary, "VSAN-DISK"))
-        self._add_table(document, ["主机数", "磁盘组数", "缓存盘数", "容量盘数", "状态"], [[self._fmt(summary.get("host_count")), self._fmt(summary.get("disk_group_count")), self._fmt(summary.get("cache_disk_count")), self._fmt(summary.get("capacity_disk_count")), status_label]], widths=GENERIC_5_COL_WIDTHS_DXA)
-        self._add_paragraph(document, self._vsan_disk_judgement(summary))
+        disk_counts = [(label, summary.get(key)) for key, label in
+                       [("host_count", "主机数"), ("disk_group_count", "磁盘组数"),
+                        ("cache_disk_count", "缓存盘数"), ("capacity_disk_count", "容量盘数")]
+                       if summary.get(key) is not None]
+        if disk_counts:
+            self._add_table(document, [label for label, _ in disk_counts],
+                            [[self._fmt(value) for _, value in disk_counts]])
+        if "disks" in items:
+            self._add_paragraph(document, items["disks"]["text"])
         self._add_vsan_disk_details(document, summary)
 
         self._add_heading(document, "4.3 对象健康", 2)
-        self._add_paragraph(document, self._vsan_category_line(summary, "VSAN-OBJECT-HEALTH"))
-        self._add_paragraph(document, self._vsan_object_judgement(summary))
+        if "objects" in items:
+            self._add_paragraph(document, items["objects"]["text"])
         self._add_vsan_object_chart(document, summary)
         if summary.get("object_issues"):
             self._add_table(document, ["对象/组件", "Health", "说明"], [[item.get("component", "未采集"), item.get("status", "未知"), item.get("summary", "")] for item in summary["object_issues"]], widths=GENERIC_3_COL_WIDTHS_DXA)
 
         self._add_heading(document, "4.4 Resync", 2)
-        self._add_paragraph(document, self._vsan_category_line(summary, "VSAN-RESYNC"))
         self._resync_status_table(document, summary)
-        self._add_paragraph(document, self._vsan_resync_judgement(summary))
+        if "resync" in items:
+            self._add_paragraph(document, items["resync"]["text"])
 
         self._add_heading(document, "4.5 vSAN VMkernel 网络", 2)
-        self._add_paragraph(document, self._vsan_category_line(summary, "VSAN-NETWORK"))
-        network = summary.get("network") or {}
-        self._add_paragraph(document, self._vsan_network_judgement(summary))
+        if "network" in items:
+            self._add_paragraph(document, items["network"]["text"])
         self._add_vsan_vmk_details(document, summary)
 
         self._add_heading(document, "4.6 Capacity", 2)
-        self._add_paragraph(document, self._vsan_category_line(summary, "VSAN-CAPACITY"))
-        capacity = summary.get("capacity") or {}
-        self._add_paragraph(document, self._vsan_capacity_judgement(summary))
+        if "capacity" in items:
+            self._add_paragraph(document, items["capacity"]["text"])
         self._add_vsan_capacity_chart(document, summary)
 
-        if summary.get("storage_policy_summary"):
+        if "policy" in items:
             self._add_heading(document, "4.7 Storage Policy", 2)
-            self._add_paragraph(document, self._vsan_category_line(summary, "VSAN-POLICY"))
-            self._add_paragraph(document, f"Storage Policy 不合规对象：{self._fmt(summary.get('policy_noncompliant_count'))}。未采集时显示 Unknown，不将其判定为通过。")
+            self._add_paragraph(document, items["policy"]["text"])
 
     def _vsan_category_line(self, summary: dict[str, Any], category_id: str) -> str:
         item = next((item for item in summary.get("report_categories") or [] if item.get("category_id") == category_id), None)
-        if not item:
-            return "检查等级：未确认；本次结论：未确认。"
-        return f"检查等级：{item.get('risk_level') or '未确认'}；本次结论：{item.get('status') or '未确认'}。"
+        if not item or item.get('status') not in {'正常','需关注'}:
+            return ''
+        if category_id == 'VSAN-NETWORK':
+            return '本项核对 vSAN VMkernel 接口配置。'
+        return f"本次结论：{item['status']}。"
 
     def _vsan_overall_judgement(self, summary: dict[str, Any]) -> str:
         issue_values = [summary.get("health_issue_count"), summary.get("disk_issue_count"), summary.get("object_issue_count")]
@@ -807,18 +929,15 @@ class DocxReportEngine:
         if objects is None or bytes_left is None:
             return "判断：Resync 状态未完整采集，当前不对重同步活动作正常判断。"
         if objects == 0 and bytes_left == 0:
-            return "判断：当前没有待重同步对象和待同步数据，预计完成时间与计划重同步按空闲状态显示为 0。"
+            return "判断：当前没有待重同步对象和待同步数据。"
         return f"判断：当前有 {self._fmt(objects)} 个对象或 {self._resync_bytes_label(bytes_left)} 待重同步，可能影响恢复窗口和存储性能，建议持续观察完成进度。"
 
     def _vsan_network_judgement(self, summary: dict[str, Any]) -> str:
         network = summary.get("network") or {}
         rows = [item for item in network.get("vmkernels") or [] if isinstance(item, dict)]
         if not rows:
-            return "判断：未采集到 vSAN VMkernel 明细，网络状态无法确认。"
-        missing = self._vsan_missing_vmk_labels(rows)
-        if missing:
-            return f"判断：已采集 {len(rows)} 条 vSAN VMkernel 明细，但其中 {missing} 条缺少 IP 或 Network Label，相关字段标记为未记录。"
-        return f"判断：已采集 {len(rows)} 条 vSAN VMkernel 明细，主机、IP、子网、Network Label 和 MTU 均已返回。"
+            return ''
+        return f"已核对 {len(rows)} 条用于 vSAN 的 VMkernel 接口配置，具体主机、IP、子网、网络标签和 MTU 见下表。"
 
     def _vsan_missing_vmk_labels(self, rows: list[dict[str, Any]]) -> int:
         missing_values = {"", "未记录", "未解析"}
@@ -846,21 +965,25 @@ class DocxReportEngine:
         vmdk_count = summary.get("vmdk_count")
         issue_count = summary.get("object_issue_count")
         rows = []
-        if object_count is None or issue_count is None:
-            rows.append(("vSAN 对象", [("未确认", 1, "9EADBC")], "对象 未采集"))
-        else:
+        legend = []
+        if object_count is not None and issue_count is not None:
             normal_count = max(int(object_count) - int(issue_count or 0), 0)
             segments = []
             if normal_count:
                 segments.append(("正常", normal_count, "4EA72E"))
+                legend.append("正常：未发现对象异常")
             if issue_count:
                 segments.append(("异常", int(issue_count), "C00000"))
-            rows.append(("vSAN 对象", segments or [("未确认", 1, "9EADBC")], f"对象 {int(object_count)}；异常 {int(issue_count or 0)}"))
-        if vmdk_count is None:
-            rows.append(("VMDK", [("未确认", 1, "9EADBC")], "VMDK 未采集"))
-        else:
+                legend.append("异常：对象健康异常")
+            if segments:
+                rows.append(("vSAN 对象", segments, f"对象 {int(object_count)}；异常 {int(issue_count or 0)}"))
+            else:
+                self._add_paragraph(document, f"vSAN 对象 {int(object_count)}；异常 {int(issue_count or 0)}")
+        if vmdk_count is not None:
             rows.append(("VMDK", [("已识别", int(vmdk_count), "4EA72E")], f"VMDK {int(vmdk_count)}"))
-        self._add_vsan_bar_chart(document, "vSAN 对象与 VMDK 健康", rows, ["正常：未发现对象异常", "已识别：VMDK 数量", "未确认：数据不足"])
+            legend.append("已识别：VMDK 数量")
+        if rows:
+            self._add_vsan_bar_chart(document, "vSAN 对象与 VMDK 健康", rows, legend)
 
     def _add_vsan_capacity_chart(self, document: Document, summary: dict[str, Any]) -> None:
         capacity = summary.get("capacity") or {}
@@ -870,14 +993,17 @@ class DocxReportEngine:
         if total is None or used is None or free is None:
             used_percent = capacity.get("used_percent")
             if used_percent is None:
-                rows = [("容量", [("未确认", 1, "9EADBC")], "容量 未采集")]
+                return
             else:
                 rows = [("容量", [("已用", float(used_percent), "2F75B5"), ("可用", max(100 - float(used_percent), 0), "9EADBC")], f"使用率 {self._fmt_percent(used_percent)}")]
+            unit = None
         else:
-            rows = [("容量", [("已用", float(used), "2F75B5"), ("可用", float(free), "9EADBC")], f"总容量 {float(total):,.1f} GB；已用 {float(used):,.1f} GB；可用 {float(free):,.1f} GB；使用率 {self._fmt_percent(capacity.get('used_percent'))}")]
-        self._add_vsan_bar_chart(document, "vSAN 容量使用", rows, ["已用", "可用"])
+            self._add_capacity_note(document)
+            unit = capacity_unit([total, used, free])
+            rows = [("容量", [("已用", float(used), "2F75B5"), ("可用", float(free), "9EADBC")], f"总容量 {capacity_text(total, unit=unit)}；已用 {capacity_text(used, unit=unit)}；可用 {capacity_text(free, unit=unit)}；使用率 {self._fmt_percent(capacity.get('used_percent'))}")]
+        self._add_vsan_bar_chart(document, "vSAN 容量使用", rows, ["已用", "可用"], capacity_display_unit=unit)
 
-    def _add_vsan_bar_chart(self, document: Document, title: str, rows: list[tuple[str, list[tuple[str, float, str]], str]], legend: list[str]) -> None:
+    def _add_vsan_bar_chart(self, document: Document, title: str, rows: list[tuple[str, list[tuple[str, float, str]], str]], legend: list[str], *, capacity_display_unit: str | None = None) -> None:
         paragraph = document.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         paragraph.paragraph_format.keep_with_next = True
@@ -898,7 +1024,8 @@ class DocxReportEngine:
             self._set_cell_width(table.rows[0].cells[0], widths[0])
             for index, ((name, value, color), width) in enumerate(zip(segments, segment_widths), start=1):
                 cell = table.rows[0].cells[index]
-                self._set_cell_text(cell, f"{name} {self._fmt(value)}" if width >= 1100 else "", align_center=True)
+                display_value = capacity_text(value, unit=capacity_display_unit) if capacity_display_unit else self._fmt(value)
+                self._set_cell_text(cell, f"{name} {display_value}" if width >= 1100 else "", align_center=True)
                 self._set_cell_width(cell, width)
                 self._shade_cell(cell, color)
                 self._color_cell_text(cell, RGBColor(255, 255, 255))
@@ -908,7 +1035,6 @@ class DocxReportEngine:
     def _add_vsan_disk_details(self, document: Document, summary: dict[str, Any]) -> None:
         rows = self._vsan_disk_rows(summary)
         if not rows:
-            self._add_paragraph(document, "本次未采集到磁盘组和物理磁盘明细，盘级状态未确认。")
             return
         table = self._add_table(document, ["主机", "磁盘组", "磁盘角色", "设备名称", "健康状态"], rows, widths=[1900, 1450, 1450, 3150, 1575])
         self._merge_table_runs(table, rows, (0, 1))
@@ -969,127 +1095,38 @@ class DocxReportEngine:
 
     def _resync_status_table(self, document: Document, summary: dict[str, Any]) -> None:
         object_count = self._safe_float(summary.get("resync_object_count"))
-        remaining_bytes = self._safe_float(summary.get("resync_bytes"))
-        idle = object_count == 0 and remaining_bytes == 0
-        has_pending = (object_count is not None and object_count > 0) or (remaining_bytes is not None and remaining_bytes > 0)
-        status = "当前无待同步任务" if idle else "当前有待同步任务" if has_pending else "状态未确认"
-        rows = [
-            ("正在重同步对象", "未采集" if object_count is None else f"{self._fmt(summary.get('resync_object_count'))} 个", idle),
-            ("待同步数据", self._resync_bytes_label(summary.get("resync_bytes")), idle),
-            ("预计完成时间", "0 秒" if idle else "未采集", False),
-            ("计划重同步", "0 项" if idle else "未采集", False),
-        ]
-        table = self._new_table(document, ["Resync 状态", status], widths=[6500, 3025], repeat_header=False)
-        for index, cell in enumerate(table.rows[0].cells):
-            self._shade_cell(cell, "F3F6F9")
-            for run in cell.paragraphs[0].runs:
-                run.font.color.rgb = RGBColor(40, 115, 72) if idle and index == 1 else RGBColor(38, 55, 70)
-        for label, value, collected_zero in rows:
-            row = table.add_row()
-            self._keep_row_together(row)
-            self._set_cell_text(row.cells[0], label)
-            self._set_cell_text(row.cells[1], value)
-            row.cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            for cell, width in zip(row.cells, table._vstacklens_widths_dxa):
-                self._set_cell_width(cell, width)
-            if collected_zero:
-                for run in row.cells[1].paragraphs[0].runs:
-                    run.font.color.rgb = RGBColor(40, 115, 72)
-        document.add_paragraph()
+        byte_count = self._safe_float(summary.get("resync_bytes"))
+        if object_count == 0 and byte_count == 0:
+            self._add_paragraph(document, "当前无待同步任务")
+        rows = []
+        if object_count is not None:
+            rows.append(["正在重同步对象", f"{self._fmt(object_count)} 个"])
+        if byte_count is not None:
+            self._add_capacity_note(document)
+            rows.append(["待同步数据", self._resync_bytes_label(byte_count)])
+        if summary.get("resync_eta_seconds") is not None:
+            rows.append(["预计完成时间", f"{self._fmt(summary['resync_eta_seconds'])} 秒"])
+        if summary.get("planned_resync_count") is not None:
+            rows.append(["计划重同步", f"{self._fmt(summary['planned_resync_count'])} 项"])
+        if rows:
+            self._add_table(document, ["项目", "当前值"], rows, widths=CLUSTER_FEATURE_WIDTHS_DXA)
 
     def _resync_bytes_label(self, value: Any) -> str:
         number = self._safe_float(value)
         if number is None:
             return "未采集"
-        if number == 0:
-            return "0 B"
-        for unit, divisor in (("TB", 1024 ** 4), ("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
-            if number >= divisor:
-                return f"{number / divisor:.1f} {unit}"
-        return f"{number:g} B"
+        return capacity_bytes_text(value)
 
     def _appendix(self, document: Document, report: ReportData, *, section_number: int = 6) -> None:
         self._add_heading(document, f"{section_number}. 环境资产与对象清单", 1)
         self._add_heading(document, f"{section_number}.1 资产清单", 2)
+        self._add_paragraph(document, "vCenter、集群、ESXi 主机及数据存储已在“VMware 巡检”章节完整列出；本节保留未重复的虚拟机清单和会话信息。")
         has_any = False
-        vcenters = self._asset_details(report, "vCenter")
-        if vcenters:
-            has_any = True
-            self._add_paragraph(document, "vCenter")
-            self._add_table(
-                document,
-                ["名称", "版本", "Build", "连接状态"],
-                [
-                    [
-                        item.get("object_name", ""),
-                        self._fmt((item.get("properties") or {}).get("version")),
-                        self._fmt((item.get("properties") or {}).get("build")),
-                        "已连接" if (item.get("properties") or {}).get("connected") is not False else "未连接",
-                    ]
-                    for item in vcenters
-                ],
-                widths=VCENTER_WIDTHS_DXA,
-            )
-
-        clusters = self._asset_details(report, "ClusterComputeResource")
-        if clusters:
-            has_any = True
-            self._add_paragraph(document, "集群")
-            self._add_table(
-                document,
-                ["集群", "主机数", "HA", "DRS", "说明"],
-                [
-                    [
-                        item.get("object_name", ""),
-                        self._fmt((item.get("properties") or {}).get("host_count")),
-                        self._enabled_label((item.get("properties") or {}).get("ha_enabled")),
-                        self._enabled_label((item.get("properties") or {}).get("drs_enabled")),
-                        self._cluster_attention(item.get("properties") or {}),
-                    ]
-                    for item in clusters
-                ],
-                widths=GENERIC_5_COL_WIDTHS_DXA,
-            )
-
-        hosts = self._asset_details(report, "HostSystem")
-        if hosts:
-            has_any = True
-            self._add_paragraph(document, "ESXi 主机")
-            self._add_table(
-                document,
-                ["主机", "所属集群", "连接状态", "CPU 使用率", "内存使用率"],
-                [
-                    [
-                        item.get("object_name", ""),
-                        self._cluster_from_location(item.get("asset_location") or (item.get("properties") or {}).get("asset_location")),
-                        self._host_state_label((item.get("properties") or {}).get("connection_state")),
-                        self._fmt_percent((item.get("properties") or {}).get("cpu_usage_avg")),
-                        self._fmt_percent((item.get("properties") or {}).get("memory_usage_avg")),
-                    ]
-                    for item in hosts
-                ],
-                widths=GENERIC_5_COL_WIDTHS_DXA,
-            )
-
-        stores = self._asset_details(report, "Datastore")
-        if stores:
-            has_any = True
-            self._add_paragraph(document, "Datastore")
-            self._add_table(
-                document,
-                ["Datastore", "类型", "已用", "剩余", "状态"],
-                [
-                    [
-                        item.get("object_name", ""),
-                        self._fmt((item.get("properties") or {}).get("datastore_filesystem_type")),
-                        self._fmt_percent((item.get("properties") or {}).get("used_percent")),
-                        self._fmt_percent((item.get("properties") or {}).get("free_percent")),
-                        "可访问" if (item.get("properties") or {}).get("accessible") is not False else "不可访问",
-                    ]
-                    for item in stores
-                ],
-                widths=GENERIC_5_COL_WIDTHS_DXA,
-            )
+        sessions = [finding for finding in report.findings if (self._observed(finding).get("idle_sessions") or self._observed(finding).get("sessions"))]
+        if sessions:
+            headers, rows = self._idle_session_table(RiskGroup("", "vCenter", "空闲会话", sessions, ""))
+            self._add_paragraph(document, "空闲会话（环境状态，不计入问题数）")
+            self._add_table(document, headers, rows, widths=self._detail_widths(headers), context_title="空闲会话明细/续表")
 
         vms = self._asset_details(report, "VirtualMachine")
         if vms:
@@ -1107,29 +1144,24 @@ class DocxReportEngine:
                     ]
                     for item in vms
                 ],
-                widths=[2600, 3400, 1900, 1625],
+                widths=[4000, 3300, 1300, 925],
+                context_title="完整虚拟机资产清单/续表",
             )
 
         if not has_any:
             self._add_paragraph(document, "本次未采集到可展示的资产清单数据。")
 
     def _aggregate_risks(self, report: ReportData) -> list[RiskGroup]:
-        grouped: dict[tuple[str, str], list[FindingItem]] = defaultdict(list)
-        for finding in report.findings:
-            level = (finding.risk_level or "").upper()
-            if level not in LEVEL_ORDER:
-                continue
-            category = self._classify_finding(finding)
-            title = self._risk_title(finding)
-            grouped[(finding.rule_id, level)].append(finding)
-
-        result: list[RiskGroup] = []
-        for (rule_id, level), findings in grouped.items():
-            category = self._classify_finding(findings[0])
-            title = self._risk_title(findings[0])
-            level = min((finding.risk_level.upper() for finding in findings if finding.risk_level.upper() in LEVEL_ORDER), key=lambda item: LEVEL_ORDER[item])
-            result.append(RiskGroup(level=level, category=category, title=title, findings=findings, rule_id=rule_id))
-        return sorted(result, key=self._risk_group_sort_key)
+        from vstacklens.reports.customer_view import get_customer_problem_view
+        view = get_customer_problem_view(report)
+        if hasattr(self, '_active_problem_views'):
+            self._active_problem_views[id(report)] = view
+        groups = []
+        for entry in view.categories:
+            category = entry.category
+            findings = [FindingItem(**row) for row in entry.projected_findings]
+            groups.append(RiskGroup(category["priority"], self._classify_finding(findings[0]), category["title"], findings, findings[0].rule_id))
+        return groups
 
     def _risk_group_sort_key(self, group: RiskGroup) -> tuple[int, int, str]:
         category_order = RISK_CATEGORY_ORDER.index(group.category) if group.category in RISK_CATEGORY_ORDER else len(RISK_CATEGORY_ORDER)
@@ -1172,13 +1204,19 @@ class DocxReportEngine:
             return "存储"
         return "集群"
 
-    def _summary_rows(self, risk_groups: list[RiskGroup]) -> list[list[str]]:
+    def _summary_rows(self, risk_groups: list[RiskGroup], *, report: ReportData | None = None) -> list[list[str]]:
         if not risk_groups:
             return [["-", "-", "本次未识别需要列入风险详情的建议关注事项。", "0", "保持定期复核"]]
         rows: list[list[str]] = []
         for group in sorted(risk_groups, key=self._risk_group_sort_key):
-            recommendation = self._recommendation(group.findings[0]) if group.findings else "结合实际业务影响评估处理"
-            rows.append([group.level, group.category, group.title, str(len(group.findings)), recommendation])
+            shared = self._shared_problem(report, group) if report is not None else None
+            if shared is not None:
+                recommendation = shared.get("remediation", "")
+            elif group.findings:
+                recommendation = self._recommendation(group.findings[0])
+            else:
+                recommendation = "结合实际业务影响评估处理"
+            rows.append([group.level, group.category, self._display_title(report, group), str(len(group.findings)), recommendation])
         return rows
 
     def _risk_counts(self, report: ReportData, risk_groups: list[RiskGroup]) -> dict[str, int]:
@@ -1196,6 +1234,8 @@ class DocxReportEngine:
         return counts
 
     def _resource_change_summary(self, document: Document, report: ReportData) -> None:
+        if not report.history_visible:
+            return
         summary = self._asset_summary(report)
         rows = [
             ["vCenter", "未提供", self._fmt(summary.get("vCenter", 0)), "本次基线", "建议后续结合历史巡检形成趋势"],
@@ -1212,7 +1252,7 @@ class DocxReportEngine:
             align_center_columns={1, 2, 3},
         )
 
-    def _detail_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]] | None:
+    def _legacy_detail_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]] | None:
         title = group.title
         rule_text = " ".join(self._clean(f"{item.rule_id} {item.rule_name} {item.title}") for item in group.findings)
         lowered = rule_text.lower()
@@ -1246,6 +1286,8 @@ class DocxReportEngine:
             return self._host_power_table(report, group)
         if "vmotion" in lowered:
             return self._vmotion_table(report, group)
+        if "VSL-NET-003" in rule_text or "网卡错误计数" in title:
+            return self._network_counter_table(group)
         if "链路" in title or "物理网卡" in title:
             return self._network_link_table(report, group)
         if "快照" in title:
@@ -1254,9 +1296,21 @@ class DocxReportEngine:
             return self._iso_table(group)
         if "Tools" in title or "VMware Tools" in title:
             return self._tools_table(report, group)
+        if "VSL-DS-001" in rule_text:
+            return self._datastore_capacity_table(report, group)
         if "VSL-DS-020" in rule_text or "vsan" in lowered:
             return self._vsan_detail_table(group)
         return self._fallback_detail_table(group)
+
+
+    def _detail_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]] | None:
+        shared = self._shared_problem(report, group)
+        if shared is None:
+            return self._legacy_detail_table(report, group)
+        table = shared.get("technical")
+        if table:
+            return table["headers"], table["rows"]
+        return ["对象", "所在范围", shared.get("basis_label", "判断依据")], [[f"{obj['name']}（{obj['level']}）", obj["location"], obj["basis"]] for obj in shared["objects"]]
 
     def _powered_off_vm_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
         rows = []
@@ -1275,7 +1329,8 @@ class DocxReportEngine:
         for finding in group.findings:
             props = self._asset_props(report, "ClusterComputeResource", finding.object_name)
             status = props.get(prop_name) if prop_name in props else finding.current_value
-            rows.append([finding.object_name, self._enabled_label(status)])
+            feature = "vSphere HA" if prop_name == "ha_enabled" else "DRS"
+            rows.append([finding.object_name, f"{feature} {self._enabled_label(status)}"])
         return ["集群", status_header], rows
 
     def _vcenter_alarm_table(self, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
@@ -1289,13 +1344,13 @@ class DocxReportEngine:
                         [
                             alarm.get("entity_name") or finding.object_name,
                             alarm.get("alarm_name") or alarm.get("name") or group.title,
-                            alarm.get("acknowledged") if alarm.get("acknowledged") is not None else "未确认",
-                            self._time_label(alarm.get("time") or alarm.get("created_time") or finding.collected_at),
+                            alarm.get("acknowledged") if alarm.get("acknowledged") is not None else "未采集",
+                            self._time_label(alarm.get("time") or alarm.get("created_time")) if alarm.get("time") or alarm.get("created_time") else "未采集",
                             alarm.get("status") or self._current_display(finding),
                         ]
                     )
             if not alarms:
-                rows.append([finding.object_name, group.title, "未确认", self._time_label(finding.collected_at), self._current_display(finding)])
+                rows.append([finding.object_name, group.title, "未采集", "未采集", self._current_display(finding)])
         return ["对象", "告警内容", "确认状态", "时间", "状态"], rows
 
     def _idle_session_table(self, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
@@ -1334,10 +1389,10 @@ class DocxReportEngine:
                 [
                     finding.object_name,
                     self._host_cluster(report, finding.object_name),
-                    "已启用" if self._truthy(running) else self._current_display(finding),
+                    "正在运行" if self._truthy(running) else "已停止" if running is False else self._current_display(finding),
                 ]
             )
-        return ["ESXi 主机", "所属集群", "当前状态"], rows
+        return ["ESXi 主机", "所属集群", "SSH 服务状态"], rows
 
     def _host_syslog_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
         rows = []
@@ -1482,6 +1537,23 @@ class DocxReportEngine:
                 rows.append([finding.object_name, self._cluster_from_location(finding.object_path), self._current_display(finding), self._recommendation(finding)])
         return ["ESXi 主机", "所属集群", "当前状态", "建议"], rows
 
+    def _network_counter_table(self, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
+        rows=[]
+        for finding in group.findings:
+            observed=self._observed(finding)
+            metrics=observed.get("affected_nics") or finding.affected_components or []
+            details=observed.get("pnic_error_detail") or []
+            if isinstance(details,list) and details:
+                for item in details:
+                    if not isinstance(item,dict): continue
+                    value=item.get("value")
+                    rows.append([finding.object_name, item.get("counter") or "未采集", "未采集" if value is None else f"{self._fmt(value)} 次",
+                        "按已保存计数指标展示；主机汇总 " + self._current_display(finding) + "，不等于链路状态；" + self._recommendation(finding)])
+            else:
+                rows.append([finding.object_name, "主机级记录；关联指标：" + self._join_display(metrics),
+                    self._current_display(finding), "保存记录未提供逐指标或逐卡计数，不将主机级计数拆分为单卡状态；" + self._recommendation(finding)])
+        return ["ESXi 主机", "指标 / 范围", "当次记录", "判断限制与建议"], rows
+
     def _network_link_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
         rows: list[list[Any]] = []
         issue_labels = {
@@ -1582,14 +1654,17 @@ class DocxReportEngine:
                 else:
                     binding = "旧版证据未记录"
                 for nic in affected or ["未采集"]:
+                    recorded=self._current_display(finding)
+                    link_label=recorded if str(recorded).strip().lower() in {"up","down","unknown","未响应","已连接","已断开"} else "未采集"
+                    limitation="" if link_label != "未采集" else f"原始主机级记录：{recorded}；未保存逐卡链路状态，不以合计数替代状态。"
                     rows.append(
                         [
                             finding.object_name,
                             nic,
                             binding,
-                            self._current_display(finding),
+                            link_label,
                             "旧版证据未记录",
-                            self._recommendation(finding),
+                            limitation + self._recommendation(finding),
                         ]
                     )
         return ["ESXi 主机", "网卡", "绑定交换机", "链路状态", "实际/配置速率", "判断与建议"], rows
@@ -1619,7 +1694,7 @@ class DocxReportEngine:
     def _snapshot_time_display(self, snapshot: dict[str, Any]) -> str:
         created = snapshot.get("create_time") or snapshot.get("created_at") or snapshot.get("creation_time")
         if created:
-            return str(created)
+            return local_time_text(created)
         age = snapshot.get("age_days") or snapshot.get("snapshot_age_days")
         return f"约 {age} 天" if age not in (None, "") else "未采集"
 
@@ -1629,7 +1704,7 @@ class DocxReportEngine:
             observed = self._observed(finding)
             iso = observed.get("iso_path") or observed.get("mounted_iso") or finding.current_value
             rows.append([finding.object_name, self._fmt(iso)])
-        return ["虚拟机名称", "ISO镜像"], rows
+        return ["虚拟机名称", "ISO 镜像"], rows
 
     def _tools_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
         rows = []
@@ -1645,17 +1720,32 @@ class DocxReportEngine:
             )
         return ["虚拟机名称", "VMware Tools 状态", "运行状态"], rows
 
+    def _datastore_capacity_table(self, report: ReportData, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
+        rows = []
+        source = []
+        for finding in group.findings:
+            props = self._asset_props(report, "Datastore", finding.object_name)
+            observed = self._observed(finding)
+            used = observed.get("used_percent", finding.current_value if finding.current_value is not None else props.get("used_percent"))
+            free = observed.get("datastore_free_gb", props.get("datastore_free_gb"))
+            source.append((finding.object_name, used, free))
+        unit = capacity_unit([free for _, _, free in source])
+        for name, used, free in source:
+            rows.append([name, self._fmt_percent(used), self._gb_size_label(free, unit=unit), "容量使用率偏高"])
+        return ["Datastore", "已用率", "剩余容量", "状态"], rows
+
     def _vsan_detail_table(self, group: RiskGroup) -> tuple[list[str], list[list[Any]]]:
         rows: list[list[Any]] = []
+        unit = capacity_unit([self._observed(finding).get("vsan_free_gb") for finding in group.findings])
         for finding in group.findings:
             observed = self._observed(finding)
-            used_percent = observed.get("vsan_used_percent") if observed else finding.current_value
+            used_percent = observed.get("vsan_used_percent", observed.get("used_percent", finding.current_value))
             rows.append(
                 [
                     observed.get("datastore_name") or finding.object_name,
                     self._fmt_percent(used_percent),
-                    self._gb_size_label(observed.get("vsan_free_gb")),
-                    "容量水位偏高" if self._is_high_percent(used_percent, 80) else self._fallback_status_value(finding),
+                    self._gb_size_label(observed.get("vsan_free_gb"), unit=unit),
+                    self._fallback_status_value(finding),
                 ]
             )
         return ["Datastore", "已用率", "剩余容量", "状态"], rows
@@ -1667,6 +1757,8 @@ class DocxReportEngine:
 
     def _detail_widths(self, headers: list[str]) -> list[int]:
         presets = {
+            ("对象", "所在范围", "判断依据"): CUSTOMER_BASIS_WIDTHS_DXA,
+            ("虚拟机名称", "当前电源状态", "建议处理"): [3200, 1400, 4925],
             ("对象", "告警内容", "确认状态", "时间", "状态"): GENERIC_5_COL_WIDTHS_DXA,
             ("用户名", "IP地址", "UserAgent", "登录时间", "上次活动时间"): GENERIC_5_COL_WIDTHS_DXA,
             ("集群", "HA 当前状态"): CLUSTER_FEATURE_WIDTHS_DXA,
@@ -1677,7 +1769,8 @@ class DocxReportEngine:
             ("ESXi 主机", "所属集群", "当前状态", "建议"): VMOTION_WIDTHS_DXA,
             ("ESXi 主机", "网卡", "绑定交换机", "链路状态", "实际/配置速率", "判断与建议"): NETWORK_LINK_WIDTHS_DXA,
             ("所在虚拟机", "快照名称", "创建时间/存在时长"): GENERIC_3_COL_WIDTHS_DXA,
-            ("虚拟机名称", "ISO镜像"): ISO_DETAIL_WIDTHS_DXA,
+            ("虚拟机名称", "ISO 镜像"): ISO_DETAIL_WIDTHS_DXA,
+            ("ESXi 主机", "所属集群", "SSH 服务状态"): GENERIC_3_COL_WIDTHS_DXA,
             ("虚拟机名称", "VMware Tools 状态", "运行状态"): GENERIC_3_COL_WIDTHS_DXA,
             ("ESXi 主机", "vSwitch或端口组", "策略项", "当前状态", "建议"): PORTGROUP_SECURITY_WIDTHS_DXA,
             ("虚拟机", "Datastore", "所属主机或集群", "影响说明"): LOCAL_DATASTORE_VM_WIDTHS_DXA,
@@ -1709,7 +1802,7 @@ class DocxReportEngine:
         document.add_paragraph()
 
     def _add_level_definition_table(self, document: Document, rows: list[list[str]]) -> None:
-        table = self._new_table(document, ["等级", "说明"], widths=LEVEL_DEFINITION_WIDTHS_DXA, repeat_header=False)
+        table = self._new_table(document, ["等级", "说明"], widths=LEVEL_DEFINITION_WIDTHS_DXA, repeat_header=True)
         widths = getattr(table, "_vstacklens_widths_dxa", LEVEL_DEFINITION_WIDTHS_DXA)
         for level, description in rows:
             table_row = table.add_row()
@@ -1731,22 +1824,54 @@ class DocxReportEngine:
         rows: list[list[Any]],
         widths: list[float] | None = None,
         align_center_columns: set[int] | None = None,
+        context_title: str | None = None,
     ) -> Any:
         if not rows:
             return None
         align_center_columns = align_center_columns or set()
         table = self._new_table(document, headers, widths=widths, repeat_header=True)
+        if context_title:
+            heading_row = table.add_row()
+            heading_cell = heading_row.cells[0].merge(heading_row.cells[-1])
+            self._set_cell_text(heading_cell, context_title, bold=True)
+            self._shade_cell(heading_cell, "D9EAF7")
+            heading_cell.paragraphs[0].paragraph_format.keep_with_next = True
+            self._repeat_header(heading_row)
+            self._keep_row_together(heading_row)
+            element = heading_row._tr
+            table._tbl.remove(element)
+            table._tbl.insert(table._tbl.index(table.rows[0]._tr), element)
         normalized_widths = getattr(table, "_vstacklens_widths_dxa", self._semantic_widths_dxa(headers))
         for row in rows:
             table_row = table.add_row()
-            self._keep_row_together(table_row)
+            # Only potentially over-height product rows need native splitting.
+            # Keep short identity rows together as before, including ordinary VC.
+            product_long_row = getattr(self, "_product_text", False) and any(
+                sum(max(24, normalized_widths[i] // 100) if ch == "\n"
+                    else 1 if ord(ch) < 128 else 2 for ch in str(value))
+                > max(24, normalized_widths[i] // 100) * 32
+                for i, value in enumerate(row[:len(headers)]))
+            if not product_long_row:
+                self._keep_row_together(table_row)
             cells = table_row.cells
             for idx, header in enumerate(headers):
                 value = row[idx] if idx < len(row) else ""
+                if value is None or value == "": value = "未采集"
                 align_center = idx in align_center_columns
                 self._set_cell_text(cells[idx], value, align_center=align_center)
                 self._set_cell_width(cells[idx], normalized_widths[idx])
-        document.add_paragraph()
+                if getattr(self, "_product_text", False) and header in {"证据", "原生级别", "采样值与单位"}:
+                    self._set_cell_text(cells[idx], str(value).replace("、", "\n"), align_center=align_center)
+                    nowrap = OxmlElement("w:noWrap")
+                    cells[idx]._tc.get_or_add_tcPr().append(nowrap)
+                if getattr(self, "_product_text", False):
+                    cells[idx].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        if getattr(self, "_product_text", False) or headers == ["对象", "所在范围", "判断依据"]:
+            table.autofit = False
+            self._set_table_fixed_width(table, normalized_widths)
+        spacer = document.add_paragraph()
+        spacer.paragraph_format.space_after = Pt(3)
+        spacer.paragraph_format.line_spacing = Pt(3)
         return table
 
     def _new_table(self, document: Document, headers: list[str], widths: list[float] | None, repeat_header: bool) -> Any:
@@ -1763,6 +1888,8 @@ class DocxReportEngine:
         for idx, header in enumerate(headers):
             cell = table.rows[0].cells[idx]
             self._set_cell_text(cell, header, bold=True, align_center=True)
+            for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.keep_with_next = True
             self._shade_cell(cell, "D9EAF7")
             self._set_cell_width(cell, normalized_widths[idx])
         return table
@@ -1880,52 +2007,93 @@ class DocxReportEngine:
             self._format_run(run, bold=True)
 
     def _add_paragraph(self, document: Document, text: Any) -> None:
+        if getattr(self, '_customer_mode', False):
+            from vstacklens.reports.customer_view import customer_text
+            text = customer_text(text)
+            if not text:
+                return
         paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = Pt(4)
         paragraph.paragraph_format.line_spacing = 1.15
+        if str(text) in {"vCenter", "集群", "ESXi 主机", "Datastore", "虚拟机"}:
+            paragraph.paragraph_format.keep_with_next = True
         run = paragraph.add_run(self._clean(text))
         self._format_run(run, size=10.5)
 
-    def _add_bullets(self, document: Document, items: list[str], empty_text: str) -> None:
+    def _add_capacity_note(self, document: Document) -> None:
+        if getattr(self, "_capacity_note_root", None) is document._element:
+            return
+        self._add_paragraph(document, CAPACITY_NOTE)
+        self._capacity_note_root = document._element
+
+    def _add_bullets(self, document: Document, items: list[str], empty_text: str, *, literal: bool = False) -> None:
         rows = items or [empty_text]
         for item in rows:
             paragraph = document.add_paragraph(style="List Bullet")
             paragraph.paragraph_format.space_after = Pt(2)
-            run = paragraph.add_run(self._clean(item))
+            run = paragraph.add_run(str(item) if literal else self._clean(item))
             self._format_run(run, size=10.5)
 
+    def _shared_problem(self, report: ReportData, group: RiskGroup) -> dict[str, Any] | None:
+        from vstacklens.reports.customer_view import get_customer_problem_view
+        views = getattr(self, '_active_problem_views', None)
+        view = views.get(id(report)) if views is not None else None
+        if view is None:
+            view = get_customer_problem_view(report)
+            if views is not None:
+                views[id(report)] = view
+        for entry in view.categories:
+            if entry.category["title"] == group.title and entry.category["priority"] == group.level:
+                return entry.display
+        return None
+
+    def _display_facts(self, report: ReportData) -> dict[str, Any]:
+        from vstacklens.reports.customer_view import customer_display_facts
+
+        return customer_display_facts(report)
+
+    def _display_title(self, report: ReportData | None, group: RiskGroup) -> str:
+        if report is None:
+            return group.title
+        shared = self._shared_problem(report, group)
+        return (shared or {}).get("title") or group.title
+
     def _add_risk_sentence(self, document: Document, group: RiskGroup, report: ReportData) -> None:
-        finding = group.findings[0]
-        observed = self._sentence_observation(group)
-        impact = self._sentence_impact(finding)
-        if group.title == "虚拟机存在快照":
-            impact = "超期快照或过深快照链可能影响业务性能、备份稳定性和虚拟机维护"
-        recommendation = self._recommendation(finding)
-        exclusion_note = ""
-        if group.rule_id == "VSL-VM-018":
-            details = (report.asset_inventory or {}).get("details") or {}
-            exclusion_note = powered_off_exclusion_note(
-                count_excluded_powered_off_vms(details.get("VirtualMachine", []))
-            )
+        item = self._shared_problem(report, group)
+        if item is None:
+            return
         paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = Pt(4)
-        level_run = paragraph.add_run(f"{group.level}级。")
-        self._format_run(level_run, size=10.5, bold=True, color=LEVEL_STYLE.get(group.level, LEVEL_STYLE["P4"])["text"])
-        body = f"检测到{observed}，可能导致{impact}。{exclusion_note}建议{recommendation}。"
-        body_run = paragraph.add_run(self._clean(body))
-        self._format_run(body_run, size=10.5)
+        run = paragraph.add_run(f"{group.level}级。")
+        self._format_run(run, size=10.5, bold=True, color=LEVEL_STYLE.get(group.level, LEVEL_STYLE["P4"])["text"])
+        body = f"{item.get('current_label', '当前值')}：{item['current']}" if item["current"] else ""
+        if item.get("expected"):
+            body += f"{item.get('expected_label', '判定标准')}：{item['expected']}"
+        if item["impact"]:
+            body += "影响：" + item["impact"]
+        if item["remediation"]:
+            body += "处理建议：" + item["remediation"]
+        self._format_run(paragraph.add_run(body), size=10.5)
+        step_groups = item.get("step_groups") or [{"title": "", "steps": item["steps"]}]
+        for step_group in step_groups:
+            if step_group.get("title"):
+                self._add_paragraph(document, step_group["title"])
+            self._add_bullets(document, [f"{i+1}. {step}" for i, step in enumerate(step_group["steps"])], empty_text='', literal=True)
 
     def _set_cell_text(self, cell: Any, text: Any, bold: bool = False, align_center: bool = False) -> None:
+        if getattr(self, '_customer_mode', False):
+            from vstacklens.reports.customer_view import customer_text
+            text = customer_text(text)
         cell.text = ""
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         paragraph = cell.paragraphs[0]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if align_center else WD_ALIGN_PARAGRAPH.LEFT
         paragraph.paragraph_format.space_after = Pt(0)
-        value = self._clean(text)
+        value = str(text).strip() if getattr(self, "_literal_customer_table", False) else self._clean(text)
         if not bold:
             value = self._wrap_long_tokens(value)
         run = paragraph.add_run(value)
-        self._format_run(run, size=9 if bold else TABLE_DATA_FONT_SIZE, bold=bold)
+        self._format_run(run, size=10 if bold else TABLE_DATA_FONT_SIZE, bold=bold)
 
     def _format_run(self, run: Any, size: float | None = None, bold: bool = False, color: RGBColor | None = None) -> None:
         run.bold = bold
@@ -1980,7 +2148,11 @@ class DocxReportEngine:
         return token
 
     def _clean(self, value: Any) -> str:
-        text = "" if value is None else str(value)
+        from vstacklens.reports.customer_view import customer_wording
+
+        text = customer_wording(value)
+        if getattr(self, "_product_text", False):
+            return text.strip()
         for old, new in COMMON_MOJIBAKE_REPLACEMENTS.items():
             text = text.replace(old, new)
         for old, new in FORBIDDEN_REPLACEMENTS.items():
@@ -1991,6 +2163,10 @@ class DocxReportEngine:
             text = pattern.sub(replacement, text)
         text = text.replace("\r", " ").replace("\n", " ")
         return " ".join(text.split()).strip()
+
+    @staticmethod
+    def _boolean_label(value: Any, positive: str, negative: str) -> str:
+        return positive if value is True else negative if value is False else "未采集"
 
     def _fmt(self, value: Any, default: str = "未采集") -> str:
         if value is None or value == "":
@@ -2005,7 +2181,7 @@ class DocxReportEngine:
         if value is None or value == "":
             return "未采集"
         try:
-            return f"{float(value):.1f}%"
+            return percent_text(value)
         except (TypeError, ValueError):
             return self._fmt(value)
 
@@ -2033,8 +2209,8 @@ class DocxReportEngine:
         if value is None or value == "":
             return "未采集"
         try:
-            return f"{float(value) * 100:.1f}%"
-        except (TypeError, ValueError):
+            return percent_text(Decimal(str(value)) * 100)
+        except (InvalidOperation, TypeError, ValueError):
             return self._fmt(value)
 
     def _safe_float(self, value: Any) -> float | None:
@@ -2194,6 +2370,9 @@ class DocxReportEngine:
         return self._fmt(finding.current_value)
 
     def _version_certificate_license_rows(self, report: ReportData) -> list[list[str]]:
+        certificates = self._display_facts(report)["certificates"]
+        host_certificates = certificates.get("hosts", [])
+        by_key = {str(entry["object_key"]): entry for entry in host_certificates if entry.get("object_key")}
         rows: list[list[str]] = []
         for item in self._asset_details(report, "vCenter"):
             props = item.get("properties") or {}
@@ -2201,33 +2380,50 @@ class DocxReportEngine:
                 [
                     f"vCenter {item.get('object_name', '')}",
                     f"vCenter {self._fmt(props.get('version'))} / Build {self._fmt(props.get('build'))}",
-                    self._certificate_label(props.get("certificate_days_remaining")),
-                    self._license_label(props.get("license_days_remaining")),
-                    self._status_summary(props.get("certificate_days_remaining"), props.get("license_days_remaining")),
+                    self._certificate_label(certificates.get("vcenter")),
+                    license_summary(props, False, str(item.get("object_key") or "")),
+                    self._status_summary(props.get("certificate_days_remaining"), props.get("license_days_remaining"), props, False, str(item.get("object_key") or "")),
                 ]
             )
         for item in self._asset_details(report, "HostSystem"):
             props = item.get("properties") or {}
+            key = str(item.get("object_key") or item.get("object_name") or "")
+            certificate = by_key.get(key)
+            if certificate is None and not item.get("object_key"):
+                matches = [entry for entry in host_certificates if entry.get("name") == item.get("object_name")]
+                certificate = matches[0] if len(matches) == 1 else None
             rows.append(
                 [
                     f"ESXi {item.get('object_name', '')}",
                     self._fmt(props.get("host_license_name"), "未采集产品授权信息"),
-                    self._certificate_label(props.get("host_certificate_days_remaining")),
-                    self._license_label(props.get("host_license_expiration_days")),
-                    self._status_summary(props.get("host_certificate_days_remaining"), props.get("host_license_expiration_days")),
+                    self._certificate_label(certificate),
+                    license_summary(props, True, str(item.get("object_key") or "")),
+                    self._status_summary(props.get("host_certificate_days_remaining"), props.get("host_license_expiration_days"), props, True, str(item.get("object_key") or "")),
                 ]
             )
         return rows
 
     def _certificate_label(self, value: Any) -> str:
+        if isinstance(value, dict):
+            parts = []
+            if value.get("days") is not None:
+                parts.append(f"证书剩余 {self._fmt(value['days'])} 天")
+            if value.get("expiry_date"):
+                expiry = f"到期日期 {value['expiry_date']}"
+                if value.get("date_source"):
+                    expiry += f"（{value['date_source']}）"
+                parts.append(expiry)
+            return "；".join(parts)
         if value is None or value == "":
-            return "未采集"
+            return ""
         try:
             return f"证书剩余 {int(float(value))} 天"
         except (TypeError, ValueError):
             return self._fmt(value)
 
     def _license_label(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return "到期状态无法确认"
         if value is None or value == "":
             return "未采集"
         try:
@@ -2235,17 +2431,21 @@ class DocxReportEngine:
         except (TypeError, ValueError):
             return self._fmt(value)
         if days >= 999999:
-            return "永久授权"
+            return "到期状态无法确认（历史数值缺少永久依据）"
         if days < 0:
             return "已过期"
         return f"剩余 {days} 天"
 
-    def _status_summary(self, certificate_days: Any, license_days: Any) -> str:
-        cert_ok = self._days_ok(certificate_days, 90)
-        license_ok = self._days_ok(license_days, 30)
-        if cert_ok and license_ok:
-            return "状态正常"
-        return "建议定期复核"
+    def _status_summary(self, certificate_days: Any, license_days: Any, properties=None, host=False, object_key=None) -> str:
+        from vstacklens.collection.license_state import verified_state
+        state = verified_state(properties or {}, host, object_key)
+        if state.get("assigned") is False:
+            return "授权未分配"
+        if state.get("expiration_state") not in {"dated", "perpetual"}:
+            return "授权到期状态无法确认"
+        if state.get("is_evaluation") is True:
+            return "评估授权，实际到期见明细"
+        return "授权到期信息已确认；判断见检查结果"
 
     def _days_ok(self, value: Any, threshold: int) -> bool:
         try:
@@ -2270,7 +2470,7 @@ class DocxReportEngine:
         for item in self._asset_details(report, "Datastore"):
             props = item.get("properties") or {}
             if str(props.get("datastore_filesystem_type", "")).lower() == "vsan" or "vsan" in str(item.get("object_name", "")).lower():
-                rows.append([item.get("object_name", ""), "可访问" if props.get("accessible") is not False else "不可访问", self._storage_attention(props)])
+                rows.append([item.get("object_name", ""), self._boolean_label(props.get("accessible"), "可访问", "不可访问"), self._storage_attention(props)])
         return rows
 
     def _observed(self, finding: FindingItem) -> dict[str, Any]:
@@ -2394,19 +2594,17 @@ class DocxReportEngine:
             )
         )
 
-    def _suggestions(self, groups: list[RiskGroup], prefix: str, suffix: str) -> list[str]:
+    def _suggestions(self, groups: list[RiskGroup], prefix: str, suffix: str, *, report: ReportData | None = None) -> list[str]:
         result = []
-        for group in sorted(groups, key=self._risk_group_sort_key)[:5]:
-            result.append(f"{prefix}“{group.title}”，{suffix}")
+        for group in sorted(groups, key=self._risk_group_sort_key):
+            result.append(f"{prefix}“{self._display_title(report, group)}”，{suffix}")
         return result
 
     def _date_label(self, value: str | None) -> str:
-        parsed = self._parse_datetime(value)
-        return parsed.strftime("%Y-%m-%d") if parsed else self._clean(value or "未记录")
+        return local_time_text(value)[:10] if value else self._clean("未记录")
 
     def _time_label(self, value: Any) -> str:
-        parsed = self._parse_datetime(str(value)) if value else None
-        return parsed.strftime("%Y-%m-%d %H:%M") if parsed else self._fmt(value)
+        return local_time_text(value) if value else self._fmt(value)
 
     def _snapshot_size_label(self, snapshot: dict[str, Any]) -> str:
         for key in ("size_gb", "snapshot_size_gb", "used_gb", "capacity_gb"):
@@ -2425,7 +2623,7 @@ class DocxReportEngine:
 
     def _snapshot_name_label(self, snapshot: dict[str, Any]) -> str:
         name = snapshot.get("name") or snapshot.get("snapshot_name")
-        return self._fmt(name, default="虚拟机存在快照")
+        return self._fmt(name, default="")
 
     def _snapshot_size_display(self, snapshot: dict[str, Any]) -> str:
         size = self._snapshot_size_label(snapshot)
@@ -2474,18 +2672,16 @@ class DocxReportEngine:
             number = float(value)
         except (TypeError, ValueError):
             return self._fmt(value)
-        if number >= 1024:
-            return f"{number / 1024:.1f} GB"
-        return f"{number:.1f} MB"
+        return capacity_text(Decimal(str(value)) / 1024)
 
-    def _gb_size_label(self, value: Any) -> str:
+    def _gb_size_label(self, value: Any, *, unit: str | None = None) -> str:
         if value is None or value == "":
             return "未采集"
         try:
             number = float(value)
         except (TypeError, ValueError):
             return self._fmt(value)
-        return f"{number:.1f} GB"
+        return capacity_text(value, unit=unit)
 
     def _bytes_size_label(self, value: Any) -> str:
         if value is None or value == "":
@@ -2494,10 +2690,7 @@ class DocxReportEngine:
             number = float(value)
         except (TypeError, ValueError):
             return self._fmt(value)
-        mb = number / (1024 * 1024)
-        if mb >= 1024:
-            return f"{mb / 1024:.1f} GB"
-        return f"{mb:.1f} MB"
+        return capacity_bytes_text(value)
 
     def _ambiguous_size_label(self, value: Any, infer_bytes: bool = False) -> str:
         text = self._clean(value)

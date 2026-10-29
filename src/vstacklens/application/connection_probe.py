@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import ssl
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any
@@ -53,8 +54,8 @@ def friendly_connection_error(error: Any) -> str:
         return "连接 vCenter 超时。请确认当前电脑可以访问 vCenter API，或联系管理员确认 vCenter API 服务可用。"
     if "10061" in text or "connection refused" in lower:
         return "vCenter API 端口无响应。请确认 vCenter 服务已启动，且当前电脑到 vCenter 的 443 端口未被防火墙拦截。"
-    if "certificate_verify_failed" in lower or ("ssl" in lower and "certificate" in lower):
-        return "vCenter 证书链不受当前电脑信任。本次巡检会在不校验证书模式下重试一次。"
+    if isinstance(error, ssl.SSLCertVerificationError) or "certificate_verify_failed" in lower or "certificate verify failed" in lower or ("ssl" in lower and "certificate" in lower):
+        return "vCenter 证书校验未通过，连接已停止。请确认服务证书和受信任证书链后重新连接。"
     if "401" in text or "403" in text or "unauthorized" in lower or "forbidden" in lower or "login" in lower or "password" in lower:
         return "用户名或密码错误，或该账号没有 vCenter API 访问权限。"
     if "name or service not known" in lower or "getaddrinfo" in lower or "nodename" in lower:
@@ -63,11 +64,8 @@ def friendly_connection_error(error: Any) -> str:
 
 
 def redact_sensitive(value: Any, *secrets: str) -> str:
-    text = str(value or "")
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, "[已隐藏]")
-    return text
+    from vstacklens.application.artifact_safety import sanitize_text
+    return sanitize_text(value, *secrets)
 
 
 def socket_probe(host: str, port: int = 443, timeout: float = CONNECT_TIMEOUT_SECONDS) -> ProbeResult:

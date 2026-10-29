@@ -30,6 +30,23 @@ from vstacklens.reports.presentation import (
 )
 
 
+def _document_rows(document):
+    # Parent titles repeat with the header on continuation pages. They are not
+    # evidence rows and do not change the number of captured disks/interfaces.
+    from docx.oxml.ns import qn
+    output=[]
+    for table in document.tables:
+        rows=list(table.rows)
+        if len(rows)>1 and rows[0].cells[0]._tc.get_or_add_tcPr().find(qn("w:gridSpan")) is not None:
+            rows=rows[1:]
+        output.append([[cell.text for cell in row.cells] for row in rows])
+    return output
+
+
+def _document_text(document):
+    return "\n".join(document.element.xpath('//w:t/text()')).replace("\u200b", "")
+
+
 def test_same_rule_hits_many_vms_counts_one_category_and_many_objects() -> None:
     findings = [
         {"rule_id": "VSL-VM-001", "risk_level": "P1", "title": "虚拟机存在超期快照", "object_name": f"vm-{index}", "health_impact": "attention"}
@@ -155,8 +172,9 @@ def test_vsan_report_context_preserves_missing_resync_values() -> None:
     document = Document()
     DocxReportEngine()._resync_status_table(document, summary)
     resync_text = "\n".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
-    assert "状态未确认" in resync_text
-    assert resync_text.count("未采集") == 4
+    assert resync_text == ""
+    assert not document.tables
+    assert summary["resync_object_count"] is None and summary["resync_bytes"] is None
 
 
 def test_vsan_network_cross_checks_selected_adapter_and_recovers_missing_label() -> None:
@@ -177,10 +195,10 @@ def test_vsan_network_cross_checks_selected_adapter_and_recovers_missing_label()
                 "vsan_enabled": True,
                 "vmkernel_adapters": [
                     {"device": "vmk0", "network_label": "Management Network"},
-                    {"device": "vmk1", "network_label": "", "ip_address": "10.250.20.69"},
+                    {"device": "vmk1", "network_label": "", "ip_address": "198.51.100.69"},
                 ],
                 "vsan_vmk_adapters": [
-                    {"device": "vmk1", "network_label": "vsan", "ip_address": "10.250.20.69"},
+                    {"device": "vmk1", "network_label": "vsan", "ip_address": "198.51.100.69"},
                 ],
             }),
         },
@@ -229,7 +247,7 @@ def test_vsan_report_semantics_keeps_missing_disk_health_and_network_label_uncon
         "resync_object_count": 0,
         "resync_bytes": 0,
         "disk_details": [{"health": "未确认"}],
-        "network": {"vmkernels": [{"device": "vmk1", "ip_address": "10.250.20.69", "network_label": "未记录"}]},
+        "network": {"vmkernels": [{"device": "vmk1", "ip_address": "198.51.100.69", "network_label": "未记录"}]},
         "capacity": {"status": "normal", "used_percent": 10},
         "policy_noncompliant_count": 0,
         "storage_policy_summary": {"checked_count": 0, "policy_categories": []},
@@ -276,7 +294,7 @@ def test_v2_vsan_risk_and_visibility_flow_from_saved_inventory(tmp_path) -> None
         }
         host = {
             "vsan_enabled": True,
-            "vmkernel_adapters": [{"device": "vmk1", "ip_address": "10.250.20.69", "network_label": "vsan", "mtu": 1500}],
+            "vmkernel_adapters": [{"device": "vmk1", "ip_address": "198.51.100.69", "network_label": "vsan", "mtu": 1500}],
         }
         for object_id, object_type, object_name, properties in (
             ("datastore-1", "Datastore", "vSAN", datastore),
@@ -289,6 +307,15 @@ def test_v2_vsan_risk_and_visibility_flow_from_saved_inventory(tmp_path) -> None
 
         builder = ReportContextBuilder()
         html_builder = HtmlReportPackageBuilder()
+        # This fixture is a new run, not a legacy inventory-only replay. Retain
+        # the bridge rule actually executed at collection time for derived grades.
+        raw_rules = RulePackLoader().load_raw(Path(__file__).resolve().parents[1] / "rulepacks" / "builtin-vsphere-v1")
+        bridge = next(SchemaValidator().validate_rule(item) for item in raw_rules if item["rule_id"] == "VSL-DS-020")
+        inventory = InventoryNormalizer().normalize({"objects": [{"object_type": "Datastore", "object_key": "datastore-1", "object_name": "vSAN", "properties": {**datastore, "vsan_issue_count": 0}}]})
+        run = RunContext(run_id=run_id, customer_id=customer_id, site_id=site_id, vcenter_id=vcenter_id, db_path=db_path)
+        insert_rule(conn, bridge)
+        for result in RuleExecutor().execute(run, inventory, [bridge]):
+            insert_rule_result(conn, result)
 
         def check(expected_p1: int, expected_status: str) -> None:
             context = builder.build(conn, run_id)
@@ -319,7 +346,7 @@ def test_v2_vsan_risk_and_visibility_flow_from_saved_inventory(tmp_path) -> None
         context = builder.build(conn, run_id)
         report = ReportDataFactory().from_context(context)
         assert context["vsan_summary"]["status"] == "not_applicable"
-        assert context["risk_summary"]["P1"] == 0
+        assert context["risk_summary"]["P3"] == 0
         page = html_builder._single_page_payload(report, context)
         html = html_builder._html(page)
         assert len(page["environment"]["clusters"]) == 0
@@ -328,7 +355,7 @@ def test_v2_vsan_risk_and_visibility_flow_from_saved_inventory(tmp_path) -> None
         doc = Document(DocxReportEngine().render(report, tmp_path / "no-vsan.docx"))
         headings = [paragraph.text for paragraph in doc.paragraphs if paragraph.style.name.startswith("Heading")]
         assert not any("vSAN 专项巡检" in heading for heading in headings)
-        assert "4. 后续处理建议" in headings
+        assert any(h.endswith('  环境详情') for h in headings) and not any("vSAN" in h for h in headings)
 
 
 def test_vsan_vmkernel_selection_excludes_management_and_vmotion() -> None:
@@ -342,15 +369,15 @@ def test_vsan_vmkernel_selection_excludes_management_and_vmotion() -> None:
                 NS(nicType="vsan", selectedVnic=["vmk2"]),
             ]),
             network=NS(vnic=[
-                NS(device="vmk0", spec=NS(portgroup="Management", mtu=1500, ip=NS(ipAddress="10.240.0.1", subnetMask="255.255.255.0"))),
-                NS(device="vmk1", spec=NS(portgroup="vMotion", mtu=1500, ip=NS(ipAddress="10.240.1.1", subnetMask="255.255.255.0"))),
-                NS(device="vmk2", spec=NS(portgroup="vSAN", mtu=9000, ip=NS(ipAddress="10.240.2.1", subnetMask="255.255.255.0"))),
+                NS(device="vmk0", spec=NS(portgroup="Management", mtu=1500, ip=NS(ipAddress="10.0.0.1", subnetMask="255.255.255.0"))),
+                NS(device="vmk1", spec=NS(portgroup="vMotion", mtu=1500, ip=NS(ipAddress="10.0.1.1", subnetMask="255.255.255.0"))),
+                NS(device="vmk2", spec=NS(portgroup="vSAN", mtu=9000, ip=NS(ipAddress="10.0.2.1", subnetMask="255.255.255.0"))),
             ]),
         ),
     )
     result = collector._vsan_vmk_adapters(host)
     assert [item["device"] for item in result] == ["vmk2"]
-    assert result[0]["ip_address"] == "10.240.2.1"
+    assert result[0]["ip_address"] == "10.0.2.1"
     assert result[0]["mtu"] == 9000
 
 
@@ -360,12 +387,12 @@ def test_vsan_vmkernel_selection_resolves_real_vsan_key_reference() -> None:
         name="esxi-01",
         config=NS(
             virtualNicManagerInfo=NS(netConfig=[NS(nicType="vsan", selectedVnic=["vsan.key-vim.host.VirtualNic-vmk1"])]),
-            network=NS(vnic=[NS(key="key-vim.host.VirtualNic-vmk1", device="vmk1", spec=NS(portgroup="vSAN", mtu=1500, ip=NS(ipAddress="10.250.20.69", subnetMask="255.255.255.0")))]),
+            network=NS(vnic=[NS(key="key-vim.host.VirtualNic-vmk1", device="vmk1", spec=NS(portgroup="vSAN", mtu=1500, ip=NS(ipAddress="198.51.100.69", subnetMask="255.255.255.0")))]),
         ),
     )
     result = collector._vsan_vmk_adapters(host)
     assert result and result[0]["device"] == "vmk1"
-    assert result[0]["ip_address"] == "10.250.20.69"
+    assert result[0]["ip_address"] == "198.51.100.69"
 
 
 def test_vsan_disk_mappings_are_grouped_by_host() -> None:
@@ -419,7 +446,7 @@ def test_vm_kernel_adapters_resolve_dvs_network_label_and_switch() -> None:
                         portgroup="",
                         distributedVirtualPort=NS(switchUuid="dvs-uuid", portgroupKey="dvportgroup-1080"),
                         mtu=1500,
-                        ip=NS(ipAddress="10.250.20.69", subnetMask="255.255.255.0"),
+                        ip=NS(ipAddress="198.51.100.69", subnetMask="255.255.255.0"),
                     ),
                 )],
             ),
@@ -433,7 +460,7 @@ def test_vm_kernel_adapters_resolve_dvs_network_label_and_switch() -> None:
     assert all_adapters[0]["network_label"] == "vsan"
     assert all_adapters[0]["switch"] == "vSAN"
     assert vsan_adapters[0]["host_name"] == "esxi-01"
-    assert vsan_adapters[0]["ip_address"] == "10.250.20.69"
+    assert vsan_adapters[0]["ip_address"] == "198.51.100.69"
     assert vsan_adapters[0]["network_label"] == "vsan"
     assert vsan_adapters[0]["switch"] == "vSAN"
 
@@ -668,39 +695,58 @@ def test_word_vsan_heading_levels_and_non_applicable_suppression(tmp_path) -> No
     report = ReportDataFactory().from_context(context)
     path = DocxReportEngine().render(report, tmp_path / "vsan.docx")
     doc = Document(path)
-    heading_styles = {paragraph.text: paragraph.style.name for paragraph in doc.paragraphs if paragraph.text.startswith("4.")}
-    assert heading_styles["4.1 集群健康"] == "Heading 2"
-    assert heading_styles["4.2 磁盘与磁盘组"] == "Heading 2"
+    heading_styles = {paragraph.text: paragraph.style.name for paragraph in doc.paragraphs if paragraph.style.name.startswith("Heading")}
+    assert heading_styles["01  环境详情"] == "Heading 1"
+    assert heading_styles["数据存储与 vSAN"] == "Heading 2"
     assert not any("Storage Policy" in paragraph.text for paragraph in doc.paragraphs)
-    assert any("判定说明" in paragraph.text for paragraph in doc.paragraphs)
-    resync_table = next(table for table in doc.tables if table.rows[0].cells[0].text == "Resync 状态")
-    resync_text = "\n".join(cell.text for row in resync_table.rows for cell in row.cells)
-    assert "当前无待同步任务" in resync_text
+    assert not any("判定说明" in paragraph.text for paragraph in doc.paragraphs)
+    resync_table = next(rows for rows in _document_rows(doc) if any(row[0] == "重同步对象" for row in rows))
+    resync_text = "\n".join(cell for row in resync_table for cell in row)
+    assert "当前无待重同步对象或数据" in _document_text(doc)
     assert "0 个" in resync_text
-    assert "0 B" in resync_text
-    assert "0 秒" in resync_text
-    assert "0 项" in resync_text
+    assert "0.0 GB" in resync_text
+    assert "预计完成时间" not in resync_text
+    assert "计划重同步" not in resync_text
+    # A32a reports measured items, never an overall normal verdict for absent disk/object data.
+    incomplete_vsan_text = _document_text(doc)
+    assert not any("vSAN 物理磁盘" in cell for rows in _document_rows(doc) for row in rows for cell in row)
+    assert "整体状态正常" not in incomplete_vsan_text
+    assert "总体 Health 正常" not in incomplete_vsan_text
+    assert "物理盘正常" not in incomplete_vsan_text
 
     active_context = {
         **context,
         "vsan_summary": {**context["vsan_summary"], "resync_object_count": 2, "resync_bytes": 1024},
     }
     report = ReportDataFactory().from_context(active_context)
+    original_active_summary = json.loads(json.dumps(report.vsan_summary))
     path = DocxReportEngine().render(report, tmp_path / "vsan-resync-active.docx")
-    active_table = next(table for table in Document(path).tables if table.rows[0].cells[0].text == "Resync 状态")
-    active_text = "\n".join(cell.text for row in active_table.rows for cell in row.cells)
-    assert "当前有待同步任务" in active_text
+    active_doc = Document(path)
+    active_table = next(rows for rows in _document_rows(active_doc) if any(row[0] == "重同步对象" for row in rows))
+    active_text = "\n".join(cell for row in active_table for cell in row)
+    # A32a replaces the old generic sentence; both measured values must survive.
+    active_paragraphs = _document_text(active_doc)
+    assert "待重同步对象 2 个" in active_paragraphs
+    assert "数据 1024 字节" in active_paragraphs
+    active_values = {row[0]: row[1] for row in active_table[1:]}
+    assert active_values["重同步对象"] == "2 个"
+    # Capacity labels now use GB with one decimal; rounding must not erase raw bytes.
+    assert active_values["重同步数据"] == "0.0 GB"
+    assert original_active_summary["resync_bytes"] == 1024
+    assert report.vsan_summary == original_active_summary
+    assert "当前无待同步任务" not in active_paragraphs
     assert "2 个" in active_text
-    assert "1.0 KB" in active_text
-    assert active_text.count("未采集") == 2
+    assert "0.0 GB" in active_text
+    assert "未采集" not in active_text
+    assert "预计完成时间" not in active_text and "计划重同步" not in active_text
 
     context["vsan_summary"] = {"applicable": False, "status": "not_applicable"}
     report = ReportDataFactory().from_context(context)
     path = DocxReportEngine().render(report, tmp_path / "no-vsan.docx")
     headings = [paragraph.text for paragraph in Document(path).paragraphs if paragraph.style.name.startswith("Heading")]
     assert not any("vSAN 专项巡检" in heading for heading in headings)
-    assert "4. 后续处理建议" in headings
-    assert "5. 环境资产与对象清单" in headings
+    assert any(h.endswith('  环境详情') for h in headings) and not any("vSAN" in h for h in headings)
+    assert "资产规模与集群" in headings
 
 
 def test_word_vsan_details_and_judgements_are_rendered(tmp_path) -> None:
@@ -715,16 +761,16 @@ def test_word_vsan_details_and_judgements_are_rendered(tmp_path) -> None:
             "host_count": 1, "disk_group_count": 1, "cache_disk_count": 1, "capacity_disk_count": 2,
             "object_count": 165, "vmdk_count": 86, "health_issue_count": 0, "disk_issue_count": 0,
             "object_issue_count": 0, "resync_object_count": 0, "resync_bytes": 0,
-            "disk_topology": [{"host": "192.168.10.64", "disk_groups": [{"id": "未记录", "cache_disk": "naa.cache", "capacity_disks": ["naa.cap1", "naa.cap2"]}]}],
+            "disk_topology": [{"host": "192.0.2.64", "disk_groups": [{"id": "未记录", "cache_disk": "naa.cache", "capacity_disks": ["naa.cap1", "naa.cap2"]}]}],
             "physical_disks": [
-                {"host": "192.168.10.64", "name": "naa.cache", "summary_health": "green"},
-                {"host": "192.168.10.64", "name": "naa.cap1", "summary_health": "green"},
-                {"host": "192.168.10.64", "name": "naa.cap2", "summary_health": "green"},
+                {"host": "192.0.2.64", "name": "naa.cache", "summary_health": "green"},
+                {"host": "192.0.2.64", "name": "naa.cap1", "summary_health": "green"},
+                {"host": "192.0.2.64", "name": "naa.cap2", "summary_health": "green"},
             ],
             "network": {"status": "collected", "vmkernels": [
-                {"host_name": "192.168.10.64", "device": "vmk0", "ip_address": "192.168.10.64", "subnet_mask": "255.255.255.0", "network_label": "Management Network", "mtu": 1500},
-                {"host_name": "192.168.10.64", "device": "vmk1", "ip_address": "10.250.20.71", "subnet_mask": "255.255.255.0", "network_label": "vsan", "mtu": 1500},
-                {"host_name": "192.168.10.64", "device": "vmk2", "ip_address": "192.168.30.12", "subnet_mask": "255.255.255.0", "network_label": "Storage", "mtu": 1500},
+                {"host_name": "192.0.2.64", "device": "vmk0", "ip_address": "192.0.2.64", "subnet_mask": "255.255.255.0", "network_label": "Management Network", "mtu": 1500},
+                {"host_name": "192.0.2.64", "device": "vmk1", "ip_address": "198.51.100.71", "subnet_mask": "255.255.255.0", "network_label": "vsan", "mtu": 1500},
+                {"host_name": "192.0.2.64", "device": "vmk2", "ip_address": "192.168.30.12", "subnet_mask": "255.255.255.0", "network_label": "Storage", "mtu": 1500},
             ]},
             "capacity": {"status": "normal", "used_percent": 10.1, "total_gb": 32192.8, "used_gb": 3247.7, "free_gb": 28945.1},
         },
@@ -733,15 +779,36 @@ def test_word_vsan_details_and_judgements_are_rendered(tmp_path) -> None:
     report = ReportDataFactory().from_context(context)
     path = DocxReportEngine().render(report, tmp_path / "vsan-details.docx")
     doc = Document(path)
-    headers = [{cell.text for cell in table.rows[0].cells} for table in doc.tables]
-    disk_index = next(index for index, header in enumerate(headers) if {"主机", "磁盘组", "磁盘角色", "设备名称", "健康状态"}.issubset(header))
-    vmk_index = next(index for index, header in enumerate(headers) if {"主机", "设备", "IP", "子网", "Network Label", "MTU"}.issubset(header))
-    assert len(doc.tables[disk_index].rows) == 4
-    assert len(doc.tables[vmk_index].rows) == 4
-    text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
-    assert "未发现对象不可访问或异常健康状态" in text
-    assert "低于 75% 关注阈值" in text
-    assert "当前没有待重同步对象" in text
+    tables = _document_rows(doc)
+    headers = [set(rows[0]) for rows in tables]
+    disk_index = next(index for index, header in enumerate(headers) if {"主机", "磁盘组", "角色", "设备", "状态"}.issubset(header))
+    vmk_headers = {"主机", "接口", "IP", "子网", "网络", "MTU"}
+    assert len(tables[disk_index]) == 4
+    assert {row[tables[disk_index][0].index("设备")] for row in tables[disk_index][1:]} == {"naa.cache", "naa.cap1", "naa.cap2"}
+    assert not any(vmk_headers.issubset(header) for header in headers)  # Labels alone do not prove service binding.
+    report.asset_inventory["details"] = {"HostSystem": [{
+        "object_type": "HostSystem", "object_key": "host-1", "object_name": "192.0.2.64",
+        "properties": {"vsan_vmk_adapters": [{"device": "vmk1"}]},
+    }]}
+    original_interfaces = list(report.vsan_summary["network"]["vmkernels"])
+    path = DocxReportEngine().render(report, tmp_path / "vsan-confirmed-network.docx")
+    doc = Document(path)
+    vmk_table = next(rows for rows in _document_rows(doc) if vmk_headers.issubset(set(rows[0])))
+    assert len(vmk_table) == 2
+    vmk_text = " ".join(cell for row in vmk_table for cell in row)
+    assert "vmk1" in vmk_text and "198.51.100.71" in vmk_text
+    assert "vmk0" not in vmk_text and "vmk2" not in vmk_text
+    assert report.vsan_summary["network"]["vmkernels"] == original_interfaces
+    text = _document_text(doc)
+    # A32a customer copy states measured values instead of a broad health conclusion.
+    assert "已识别 165 个 vSAN 对象，健康异常 0 项" in text
+    assert "容量使用率 10.1%" in text
+    assert "当前无待重同步对象或数据" in text
+    assert "整体状态正常" not in text and "总体 Health 正常" not in text
+    resync_table = next(rows for rows in _document_rows(doc) if any(row[0] == "重同步对象" for row in rows))
+    resync_values = {row[0]: row[1] for row in resync_table[1:]}
+    assert resync_values["重同步对象"] == "0 个"
+    assert resync_values["重同步数据"] == "0.0 GB"
     assert "Storage Policy" not in text
 
 

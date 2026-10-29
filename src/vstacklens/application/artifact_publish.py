@@ -24,3 +24,16 @@ def staged_report(destination: Path):
     finally:
         if stage.exists():
             shutil.rmtree(stage)
+
+
+@contextmanager
+def staged_file(destination: Path, *, secrets: tuple[str, ...] = ()):
+    """Scan a complete new file before making it available to export callers."""
+    from vstacklens.application.artifact_safety import ensure_artifacts_safe
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".vstacklens-export-", dir=destination.parent) as temporary:
+        stage = Path(temporary) / destination.name
+        yield stage
+        ensure_artifacts_safe([stage], secrets=secrets)
+        os.replace(stage, destination)

@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from vstacklens.deep.analyzer import DeepAnalysisResult
 from vstacklens.deep.contracts import DatasetRecord, DeepDataset, DeepEntity, DeepSource, DeepWindow, now_utc_iso
+from vstacklens.deep.backup import backup_before_migration
+from vstacklens.deep.provenance import fingerprint
 
 
 _CAPACITY_METRICS = {
@@ -24,10 +28,52 @@ class DeepHistoryStore:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._transaction_connection: sqlite3.Connection | None = None
         self._init()
+
+    @contextmanager
+    def _connection(self):
+        if self._transaction_connection is not None:
+            yield self._transaction_connection
+        else:
+            with closing(sqlite3.connect(self.path)) as conn, conn:
+                yield conn
+
+    @contextmanager
+    def transaction(self, dataset: DeepDataset):
+        """Validate under the write lock before any service business writes."""
+        if self._transaction_connection is not None:
+            raise RuntimeError("Nested Deep history transaction")
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._validate_dataset_identity(conn, dataset)
+                self._transaction_connection = conn
+                yield self
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                self._transaction_connection = None
+
+    @staticmethod
+    def _validate_dataset_identity(conn, dataset):
+        environment_id = str(dataset.manifest.target.get("vcenter_ref") or "unknown")
+        canonical = conn.execute("SELECT analysis_id, lifecycle_json, input_sha256 FROM deep_analysis_runs WHERE dataset_id=? AND canonical=1", (dataset.dataset_id,)).fetchone()
+        existing = conn.execute("SELECT environment_id, created_at_utc FROM deep_datasets WHERE dataset_id=?", (dataset.dataset_id,)).fetchone()
+        if existing and (existing[0] != environment_id or existing[1] != dataset.manifest.created_at_utc):
+            raise ValueError("Dataset identifier was reused for a different environment or collection time")
+        if canonical and canonical[2] != fingerprint(dataset.model_dump(mode="json")):
+            raise ValueError("Dataset identifier was reused for different original evidence")
+        if existing and not canonical:
+            raise ValueError("Historical Dataset has no original evidence fingerprint; append under the same ID is not verifiable")
+        return canonical, existing
 
     def _init(self) -> None:
         with sqlite3.connect(self.path) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.migration_backup = backup_before_migration(conn, self.path) if "deep_datasets" in tables and "deep_analysis_runs" not in tables else None
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS deep_datasets (
@@ -79,6 +125,20 @@ class DeepHistoryStore:
                   dataset_id TEXT PRIMARY KEY,
                   completed_at_utc TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS deep_analysis_runs (
+                  analysis_id TEXT PRIMARY KEY,
+                  dataset_id TEXT NOT NULL,
+                  environment_id TEXT NOT NULL,
+                  dataset_created_at_utc TEXT NOT NULL,
+                  analyzed_at_utc TEXT NOT NULL,
+                  canonical INTEGER NOT NULL,
+                  input_sha256 TEXT NOT NULL,
+                  provenance_json TEXT NOT NULL,
+                  analysis_json TEXT NOT NULL,
+                  lifecycle_json TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS deep_analysis_canonical
+                  ON deep_analysis_runs(dataset_id) WHERE canonical = 1;
                 """
             )
 
@@ -86,84 +146,190 @@ class DeepHistoryStore:
         """Persist stable current-capacity measurements without changing the Dataset."""
 
         environment_id = str(dataset.manifest.target.get("vcenter_ref") or "unknown")
-        with sqlite3.connect(self.path) as conn:
+        with self._connection() as conn:
+            self._validate_dataset_identity(conn, dataset)
             self._record_metric_observations(conn, dataset, environment_id)
-            conn.commit()
 
     def record(self, dataset: DeepDataset, analysis: DeepAnalysisResult, dataset_path: Path | None = None) -> dict[str, dict[str, Any]]:
         environment_id = str(dataset.manifest.target.get("vcenter_ref") or "unknown")
         now = now_utc_iso()
-        lifecycles: dict[str, dict[str, Any]] = {}
+        provenance = analysis.diagnostic.analysis_provenance
         current_ids = {finding.finding_id for finding in analysis.findings}
         rule_statuses = {
             result.rule_id: str(getattr(result.status, "value", result.status)).upper()
             for result in analysis.rule_results
         }
-        with sqlite3.connect(self.path) as conn:
+        with self._connection() as conn:
+            if self._transaction_connection is None:
+                conn.execute("BEGIN IMMEDIATE")
+            canonical, legacy_existing = self._validate_dataset_identity(conn, dataset)
+            if canonical or legacy_existing:
+                states = json.loads(canonical[1]) if canonical else self._snapshot_at(conn, environment_id, dataset.manifest.created_at_utc)
+                provenance["history_write"] = "REANALYSIS_ONLY"
+                provenance["original_analysis_id"] = canonical[0] if canonical else "LEGACY_ORIGINAL_NOT_ARCHIVED"
+                self._archive_analysis(conn, dataset, analysis, states, canonical=False)
+                return {item["finding_id"]: item for item in states if item["finding_id"] in current_ids}
+            states = self._snapshot_at(conn, environment_id, dataset.manifest.created_at_utc)
+            state_index = {item["finding_id"]: item for item in states}
             conn.execute(
-                "INSERT OR REPLACE INTO deep_datasets(dataset_id, environment_id, created_at_utc, dataset_path, manifest_json) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO deep_datasets(dataset_id, environment_id, created_at_utc, dataset_path, manifest_json) VALUES (?, ?, ?, ?, ?)",
                 (dataset.dataset_id, environment_id, dataset.manifest.created_at_utc, str(dataset_path or ""), dataset.manifest.model_dump_json()),
             )
             for rule_id, status in rule_statuses.items():
                 conn.execute(
-                    "INSERT OR REPLACE INTO deep_rule_evaluations(dataset_id, environment_id, rule_id, status) VALUES (?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO deep_rule_evaluations(dataset_id, environment_id, rule_id, status) VALUES (?, ?, ?, ?)",
                     (dataset.dataset_id, environment_id, rule_id, status),
                 )
             self._record_metric_observations(conn, dataset, environment_id)
             for finding in analysis.findings:
-                existing = conn.execute("SELECT first_seen_dataset, occurrence_count FROM deep_finding_history WHERE finding_id = ?", (finding.finding_id,)).fetchone()
-                if existing is None:
-                    first_seen = dataset.dataset_id
-                    count = 1
-                else:
-                    first_seen = existing[0]
-                    observed = conn.execute("SELECT 1 FROM deep_finding_observations WHERE dataset_id = ? AND finding_id = ?", (dataset.dataset_id, finding.finding_id)).fetchone()
-                    count = int(existing[1]) if observed else int(existing[1]) + 1
+                existing = state_index.get(finding.finding_id, {})
                 lifecycle = {
+                    **existing,
+                    "finding_id": finding.finding_id,
+                    "rule_id": finding.rule_id,
                     "status": "OPEN",
                     "verification_status": "CONFIRMED",
-                    "first_seen_dataset": first_seen,
+                    "verification_label": "本次确认问题仍存在",
+                    "first_seen_dataset": existing.get("first_seen_dataset", dataset.dataset_id),
                     "last_seen_dataset": dataset.dataset_id,
-                    "occurrence_count": count,
+                    "occurrence_count": int(existing.get("occurrence_count", 0)) + 1,
+                    "original_finding": existing.get("original_finding", finding.model_dump(mode="json")),
+                    "last_observed_finding": finding.model_dump(mode="json"),
+                    "original_rule_fingerprint": existing.get("original_rule_fingerprint", provenance.get("rule_fingerprints", {}).get(finding.rule_id, "") if provenance.get("resolution_eligible") else ""),
                 }
-                conn.execute(
-                    "INSERT OR REPLACE INTO deep_finding_history(finding_id, environment_id, rule_id, first_seen_dataset, last_seen_dataset, occurrence_count, status, lifecycle_json, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (finding.finding_id, environment_id, finding.rule_id, first_seen, dataset.dataset_id, count, "OPEN", json.dumps(lifecycle, ensure_ascii=False), now),
-                )
+                lifecycle.pop("resolved_dataset", None)
+                state_index[finding.finding_id] = lifecycle
                 conn.execute(
                     "INSERT OR IGNORE INTO deep_finding_observations(dataset_id, finding_id, observed_at_utc, payload_json) VALUES (?, ?, ?, ?)",
-                    (dataset.dataset_id, finding.finding_id, now, finding.model_dump_json()),
+                    (dataset.dataset_id, finding.finding_id, dataset.manifest.created_at_utc, finding.model_dump_json()),
                 )
-                lifecycles[finding.finding_id] = lifecycle
-            rows = conn.execute("SELECT finding_id, rule_id, lifecycle_json FROM deep_finding_history WHERE environment_id = ? AND status = 'OPEN'", (environment_id,)).fetchall()
-            for finding_id, rule_id, lifecycle_json in rows:
-                if finding_id in current_ids:
+            for finding_id, lifecycle in state_index.items():
+                if finding_id in current_ids or lifecycle.get("status") != "OPEN":
                     continue
-                lifecycle = json.loads(lifecycle_json)
-                rule_status = rule_statuses.get(str(rule_id))
-                if rule_status == "PASS":
+                reason, evidence = self._verification(dataset, analysis, lifecycle)
+                if reason == "CONFIRMED_RESOLVED":
                     lifecycle.update({
                         "status": "RESOLVED",
                         "verification_status": "CONFIRMED_RESOLVED",
+                        "verification_label": "原对象已复检并确认解决",
                         "resolved_dataset": dataset.dataset_id,
+                        "resolution_evidence": evidence,
                     })
-                    conn.execute(
-                        "UPDATE deep_finding_history SET status = 'RESOLVED', lifecycle_json = ?, last_seen_dataset = ?, updated_at_utc = ? WHERE finding_id = ?",
-                        (json.dumps(lifecycle, ensure_ascii=False), dataset.dataset_id, now, finding_id),
-                    )
                 else:
                     lifecycle.update({
                         "status": "OPEN",
                         "verification_status": "UNVERIFIED",
                         "verification_dataset": dataset.dataset_id,
-                        "verification_reason": rule_status or "RULE_NOT_EVALUATED",
+                        "verification_reason": reason,
+                        "verification_label": {"OBJECT_ABSENT": "对象缺席，不能确认解决", "INSUFFICIENT_DATA": "数据不足", "PERMISSION_DENIED": "权限失败", "POLICY_CHANGED": "判断口径变化，尚未按原口径复核", "ORIGINAL_POLICY_MISSING": "缺少历史判断口径，尚未验证解决", "HISTORICAL_NOT_REPEATED": "当前窗口未再触发，不能确认历史问题已解决", "ERROR": "复检出错"}.get(reason, "未复检"),
                     })
+            states = list(state_index.values())
+            self._archive_analysis(conn, dataset, analysis, states, canonical=True)
+            newer = conn.execute("SELECT 1 FROM deep_datasets WHERE environment_id = ? AND julianday(created_at_utc) > julianday(?) LIMIT 1", (environment_id, dataset.manifest.created_at_utc)).fetchone()
+            if not newer:
+                for lifecycle in states:
                     conn.execute(
-                        "UPDATE deep_finding_history SET lifecycle_json = ?, updated_at_utc = ? WHERE finding_id = ?",
-                        (json.dumps(lifecycle, ensure_ascii=False), now, finding_id),
+                        "INSERT OR REPLACE INTO deep_finding_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (lifecycle["finding_id"], environment_id, lifecycle["rule_id"], lifecycle["first_seen_dataset"], lifecycle["last_seen_dataset"], lifecycle["occurrence_count"], lifecycle["status"], json.dumps(lifecycle, ensure_ascii=False), now),
                     )
-            conn.commit()
-        return lifecycles
+        return {item["finding_id"]: item for item in states if item["finding_id"] in current_ids}
+
+    @staticmethod
+    def _archive_analysis(conn, dataset, analysis, states, *, canonical):
+        provenance = analysis.diagnostic.analysis_provenance
+        conn.execute("INSERT INTO deep_analysis_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+            uuid4().hex, dataset.dataset_id, str(dataset.manifest.target.get("vcenter_ref") or "unknown"),
+            dataset.manifest.created_at_utc, now_utc_iso(), int(canonical), fingerprint(dataset.model_dump(mode="json")),
+            json.dumps(provenance, ensure_ascii=False),
+            json.dumps({"rule_results": [item.model_dump(mode="json") for item in analysis.rule_results], "findings": [item.model_dump(mode="json") for item in analysis.findings]}, ensure_ascii=False),
+            json.dumps(states, ensure_ascii=False),
+        ))
+
+    @staticmethod
+    def _verification(dataset, analysis, lifecycle):
+        from vstacklens.collection.diagnostics import permission_failure
+        rule_id = lifecycle["rule_id"]
+        result = next((item for item in analysis.rule_results if item.rule_id == rule_id), None)
+        if result is None:
+            return "NOT_RECHECKED", []
+        caps = [dataset.capability.get(item) for item in result.missing_capabilities]
+        if any(cap and permission_failure(cap.detail) for cap in caps):
+            return "PERMISSION_DENIED", []
+        if result.missing_capabilities:
+            return "NOT_RECHECKED", []
+        original = lifecycle.get("last_observed_finding") or lifecycle.get("original_finding") or {}
+        scope = original.get("scope") or {}
+        ids = set(scope.get("member_ids") or [scope.get("scope_id")]) - {None, ""}
+        matches = [item for item in result.object_results if item.scope.dimension_key == scope.get("dimension_key") and item.scope.scope_type.value == scope.get("scope_type") and set(item.scope.member_ids or [item.scope.scope_id]) <= ids]
+        checked_ids = {entity_id for item in matches for entity_id in item.scope.member_ids or [item.scope.scope_id]}
+        if not ids or ids - checked_ids:
+            inventory_ids = {record.entity.stable_id for record in dataset.records}
+            return ("NOT_RECHECKED" if ids and ids <= inventory_ids else "OBJECT_ABSENT"), []
+        if any(item.reason == "permission_denied" for item in matches):
+            return "PERMISSION_DENIED", []
+        if any(item.status.value == "ERROR" for item in matches):
+            return "ERROR", []
+        if any(item.status.value == "INSUFFICIENT_DATA" for item in matches):
+            return "INSUFFICIENT_DATA", []
+        if any(item.status.value != "PASS" or not item.evidence_refs for item in matches):
+            return "NOT_RECHECKED", []
+        provenance = analysis.diagnostic.analysis_provenance
+        if not lifecycle.get("original_rule_fingerprint"):
+            return "ORIGINAL_POLICY_MISSING", []
+        if not provenance.get("resolution_eligible"):
+            return ("POLICY_CHANGED" if provenance.get("original_policy_available") else "ORIGINAL_POLICY_MISSING"), []
+        if lifecycle["original_rule_fingerprint"] != provenance.get("rule_fingerprints", {}).get(rule_id):
+            return "POLICY_CHANGED", []
+        if original.get("category") != "current_risk":
+            return "HISTORICAL_NOT_REPEATED", []
+        return "CONFIRMED_RESOLVED", [item.model_dump(mode="json") for item in matches]
+
+    @staticmethod
+    def _snapshot_at(conn, environment_id, as_of=None, dataset_id=None):
+        if dataset_id:
+            exact = conn.execute("SELECT lifecycle_json FROM deep_analysis_runs WHERE dataset_id=? AND environment_id=? AND canonical=1 AND (? IS NULL OR julianday(dataset_created_at_utc)<=julianday(?))", (dataset_id, environment_id, as_of, as_of)).fetchone()
+            if exact:
+                return json.loads(exact[0])
+        row = conn.execute(
+            "SELECT lifecycle_json FROM deep_analysis_runs WHERE environment_id=? AND canonical=1 "
+            "AND (? IS NULL OR julianday(dataset_created_at_utc) <= julianday(?)) ORDER BY julianday(dataset_created_at_utc) DESC, rowid DESC LIMIT 1",
+            (environment_id, as_of, as_of),
+        ).fetchone()
+        if row:
+            return json.loads(row[0])
+        # Legacy aggregate PASS never proves that the original object was checked.
+        boundary = conn.execute("SELECT rowid FROM deep_datasets WHERE dataset_id=? AND environment_id=?", (dataset_id, environment_id)).fetchone()
+        boundary_row = boundary[0] if boundary else -1
+        rows = conn.execute(
+            "SELECT o.finding_id, o.dataset_id, o.payload_json FROM deep_finding_observations o JOIN deep_datasets d ON d.dataset_id=o.dataset_id "
+            "WHERE d.environment_id=? AND (? IS NULL OR julianday(d.created_at_utc)<=julianday(?)) "
+            "AND (? IS NULL OR julianday(d.created_at_utc)<julianday(?) OR d.rowid<=?) ORDER BY julianday(d.created_at_utc), o.rowid",
+            (environment_id, as_of, as_of, dataset_id, as_of, boundary_row),
+        ).fetchall()
+        states = {}
+        for finding_id, dataset_id, payload in rows:
+            finding = json.loads(payload)
+            previous = states.get(finding_id, {})
+            states[finding_id] = {"finding_id": finding_id, "rule_id": finding["rule_id"], "status": "OPEN", "verification_status": "UNVERIFIED", "verification_reason": "LEGACY_OBJECT_VERIFICATION_MISSING", "verification_label": "旧记录缺少原对象复检证据", "first_seen_dataset": previous.get("first_seen_dataset", dataset_id), "last_seen_dataset": dataset_id, "occurrence_count": previous.get("occurrence_count", 0) + 1, "original_finding": previous.get("original_finding", finding), "last_observed_finding": finding}
+        return list(states.values())
+
+    def lifecycle_snapshot(self, environment_id: str, *, resolved_limit: int = 250, as_of: str | None = None, as_of_dataset_id: str | None = None) -> dict[str, Any]:
+        """Return bounded open/resolved finding history for diagnostics and offline review."""
+
+        limit = max(0, min(1000, int(resolved_limit)))
+        with self._connection() as conn:
+            states = self._snapshot_at(conn, environment_id, as_of, as_of_dataset_id)
+        open_rows = [item for item in states if item["status"] == "OPEN"]
+        resolved_rows = [item for item in states if item["status"] == "RESOLVED"]
+        resolved_count = len(resolved_rows)
+        entries = [*open_rows, *resolved_rows[:limit]]
+        return {
+            "status_counts": {"OPEN": len(open_rows), "RESOLVED": resolved_count},
+            "entries": entries,
+            "omitted_resolved_count": max(0, resolved_count - limit),
+            "as_of": as_of,
+            "resolution_boundary": "RESOLVED requires PASS evidence for every original object under the same recorded rule and thresholds. Missing objects, permission failures, incomplete evidence, unevaluated rules and reinterpretation remain unverified.",
+        }
 
     def metric_records(
         self,
@@ -172,29 +338,36 @@ class DeepHistoryStore:
         metric_id: str,
         rule_id: str,
         window_days: int = 90,
+        as_of: str | None = None,
+        as_of_dataset_id: str | None = None,
     ) -> list[DatasetRecord]:
         """Return per-entity historical measurements as read-only trend evidence."""
 
-        with sqlite3.connect(self.path) as conn:
+        with self._connection() as conn:
             self._backfill_metric_observations(conn)
+            boundary = conn.execute("SELECT rowid FROM deep_datasets WHERE dataset_id=? AND environment_id=?", (as_of_dataset_id, environment_id)).fetchone()
+            boundary_row = boundary[0] if boundary else -1
             all_rows = conn.execute(
-                "SELECT observed_at_utc FROM deep_metric_observations WHERE environment_id = ? AND metric_id = ? ORDER BY observed_at_utc",
-                (environment_id, metric_id),
+                "SELECT observed_at_utc FROM deep_metric_observations WHERE environment_id = ? AND metric_id = ? "
+                "AND (? IS NULL OR julianday(observed_at_utc) <= julianday(?)) ORDER BY julianday(observed_at_utc)",
+                (environment_id, metric_id, as_of, as_of),
             ).fetchall()
             if not all_rows:
                 return []
-            anchor = datetime.fromisoformat(str(all_rows[-1][0]).replace("Z", "+00:00")).astimezone(UTC)
+            anchor = datetime.fromisoformat(str(as_of or all_rows[-1][0]).replace("Z", "+00:00")).astimezone(UTC)
             cutoff = anchor - timedelta(days=window_days)
             rows = conn.execute(
                 """
-                SELECT dataset_id, entity_id, entity_type, entity_ref, observed_at_utc, value, unit
-                FROM deep_metric_observations
-                WHERE environment_id = ? AND metric_id = ? AND observed_at_utc >= ?
-                ORDER BY entity_id, observed_at_utc
+                SELECT m.dataset_id, entity_id, entity_type, entity_ref, observed_at_utc, value, unit
+                FROM deep_metric_observations m LEFT JOIN deep_datasets d ON d.dataset_id=m.dataset_id
+                WHERE m.environment_id = ? AND metric_id = ? AND julianday(observed_at_utc) >= julianday(?)
+                  AND julianday(observed_at_utc) <= julianday(?)
+                  AND (d.dataset_id IS NULL OR julianday(d.created_at_utc) <= julianday(?))
+                  AND (? IS NULL OR m.dataset_id = ? OR (d.rowid IS NOT NULL AND (julianday(d.created_at_utc) < julianday(?) OR d.rowid <= ?)))
+                ORDER BY entity_id, julianday(observed_at_utc)
                 """,
-                (environment_id, metric_id, cutoff.replace(microsecond=0).isoformat().replace("+00:00", "Z")),
+                (environment_id, metric_id, cutoff.isoformat(), anchor.isoformat(), anchor.isoformat(), as_of_dataset_id, as_of_dataset_id, anchor.isoformat(), boundary_row),
             ).fetchall()
-            conn.commit()
         daily_rows: dict[tuple[str, str], tuple[Any, ...]] = {}
         for row in rows:
             day = datetime.fromisoformat(str(row[4]).replace("Z", "+00:00")).astimezone(UTC).date().isoformat()
@@ -307,15 +480,19 @@ class DeepHistoryStore:
                 (str(dataset_id), now_utc_iso()),
             )
 
-    def trend_summary(self, environment_id: str, *, window_days: int = 90) -> dict[str, Any]:
-        with sqlite3.connect(self.path) as conn:
+    def trend_summary(self, environment_id: str, *, window_days: int = 90, as_of: str | None = None, as_of_dataset_id: str | None = None) -> dict[str, Any]:
+        with self._connection() as conn:
+            boundary = conn.execute("SELECT rowid FROM deep_datasets WHERE dataset_id=? AND environment_id=?", (as_of_dataset_id, environment_id)).fetchone()
+            boundary_row = boundary[0] if boundary else -1
             all_rows = conn.execute(
-                "SELECT dataset_id, created_at_utc FROM deep_datasets WHERE environment_id = ? ORDER BY created_at_utc",
-                (environment_id,),
+                "SELECT dataset_id, created_at_utc FROM deep_datasets WHERE environment_id = ? "
+                "AND (? IS NULL OR julianday(created_at_utc) <= julianday(?)) "
+                "AND (? IS NULL OR dataset_id=? OR julianday(created_at_utc)<julianday(?) OR rowid<=?) ORDER BY julianday(created_at_utc), rowid",
+                (environment_id, as_of, as_of, as_of_dataset_id, as_of_dataset_id, as_of, boundary_row),
             ).fetchall()
             if not all_rows:
                 return {"state": "INSUFFICIENT_DATA", "dataset_count": 0, "window_days": window_days}
-            anchor = datetime.fromisoformat(str(all_rows[-1][1]).replace("Z", "+00:00")).astimezone(UTC)
+            anchor = datetime.fromisoformat(str(as_of or all_rows[-1][1]).replace("Z", "+00:00")).astimezone(UTC)
             cutoff = anchor - timedelta(days=window_days)
             rows = [row for row in all_rows if datetime.fromisoformat(str(row[1]).replace("Z", "+00:00")).astimezone(UTC) >= cutoff]
             if len(rows) < 2:
@@ -339,25 +516,13 @@ class DeepHistoryStore:
             baseline_id, current_id = datasets[0], datasets[-1]
             baseline_findings = observations[baseline_id]
             current_findings = observations[current_id]
-            current_rule_statuses = {
-                str(row[0]): str(row[1]).upper()
-                for row in conn.execute(
-                    "SELECT rule_id, status FROM deep_rule_evaluations WHERE dataset_id = ?",
-                    (current_id,),
-                ).fetchall()
-            }
             absent_from_current = baseline_findings - current_findings
-            open_findings = conn.execute(
-                "SELECT finding_id, rule_id FROM deep_finding_history WHERE environment_id = ? AND status = 'OPEN'",
-                (environment_id,),
-            ).fetchall()
+            states = self._snapshot_at(conn, environment_id, str(rows[-1][1]), current_id)
+            verified_resolved = {item["finding_id"] for item in states if item.get("verification_status") == "CONFIRMED_RESOLVED"}
             unverified_findings = {
-                str(finding_id)
-                for finding_id, rule_id in open_findings
-                if finding_id not in current_findings
-                and current_rule_statuses.get(str(rule_id)) != "PASS"
-            }
-            resolved_findings = absent_from_current - unverified_findings
+                item["finding_id"] for item in states if item["status"] == "OPEN" and item["finding_id"] not in current_findings
+            } | (absent_from_current - verified_resolved)
+            resolved_findings = absent_from_current & verified_resolved
             return {
                 "state": "READY",
                 "window_days": window_days,

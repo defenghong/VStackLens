@@ -22,6 +22,7 @@ from vstacklens.rules.schema_validator import SchemaValidator
 from vstacklens.application.upgrade_compat_service import UpgradeCompatConfig, UpgradeCompatService
 from vstacklens.deep.service import DeepInspectionService
 from vstacklens.deep.interfaces import DeepCollectionPolicy
+from vstacklens.deep.model_assistant import load_configured_model
 
 
 def cmd_init_db(args: argparse.Namespace) -> None:
@@ -235,19 +236,42 @@ def cmd_run_upgrade_compat(args: argparse.Namespace) -> None:
 def cmd_run_deep_dataset(args: argparse.Namespace) -> None:
     """Run the read-only Deep Analyzer against a portable Dataset or fixture."""
 
+    model_config, model_state = load_configured_model(
+        enabled=bool(getattr(args, "enable_model_assist", False)),
+        profile_id=getattr(args, "model_profile_id", None),
+    )
     result = DeepInspectionService().analyze_dataset(
         Path(args.dataset),
         Path(args.report_dir),
         docx_out=Path(args.docx_out) if args.docx_out else None,
+        model_config=model_config,
+        model_enabled=bool(getattr(args, "enable_model_assist", False)),
+        model_unavailable_reason=model_state,
     )
     print(f"Deep analysis completed. HTML report: {result.html_path}")
     print(f"Deep diagnostic record: {result.diagnostic_path}")
+    print(f"Model analysis: {getattr(result, 'model_analysis_status', 'unavailable')}")
+    if getattr(result, "offline_evidence_zip", None):
+        print(f"Local evidence ZIP: {result.offline_evidence_zip}")
+    elif getattr(result, "offline_evidence_package_status", "") == "failed":
+        print("Local evidence ZIP: failed; see Deep diagnostic record for the sanitized failure type.")
     if result.docx_path:
         print(f"Word report: {result.docx_path}")
 
 
 def cmd_run_deep_replay(args: argparse.Namespace) -> None:
-    results = DeepInspectionService().replay_datasets([Path(item) for item in args.dataset], Path(args.report_dir), docx_out=Path(args.docx_out) if args.docx_out else None)
+    model_config, model_state = load_configured_model(
+        enabled=bool(getattr(args, "enable_model_assist", False)),
+        profile_id=getattr(args, "model_profile_id", None),
+    )
+    results = DeepInspectionService().replay_datasets(
+        [Path(item) for item in args.dataset],
+        Path(args.report_dir),
+        docx_out=Path(args.docx_out) if args.docx_out else None,
+        model_config=model_config,
+        model_enabled=bool(getattr(args, "enable_model_assist", False)),
+        model_unavailable_reason=model_state,
+    )
     if not results:
         raise SystemExit("至少需要一个 Dataset")
     print(f"Deep replay completed: {len(results)} datasets")
@@ -258,16 +282,28 @@ def cmd_run_deep_replay(args: argparse.Namespace) -> None:
         print(f"Trend readiness: {json.dumps(trend_log.get('windows', {}), ensure_ascii=False)}")
     if results[-1].docx_path:
         print(f"Latest Word report: {results[-1].docx_path}")
+    print(f"Model analysis: {getattr(results[-1], 'model_analysis_status', 'unavailable')}")
+    if getattr(results[-1], "offline_evidence_zip", None):
+        print(f"Local evidence ZIP: {results[-1].offline_evidence_zip}")
+    elif getattr(results[-1], "offline_evidence_package_status", "") == "failed":
+        print("Local evidence ZIP: failed; see Deep diagnostic record for the sanitized failure type.")
 
 
 def cmd_run_deep_vcenter(args: argparse.Namespace) -> None:
     """Run the real vCenter Deep Core collector with the workbook's primary account, using read-only operations."""
 
+    model_config, model_state = load_configured_model(
+        enabled=bool(getattr(args, "enable_model_assist", False)),
+        profile_id=getattr(args, "model_profile_id", None),
+    )
     result = DeepInspectionService().collect_and_analyze_vcenter(
         Path(args.connection_workbook),
         Path(args.report_dir),
         docx_out=Path(args.docx_out) if args.docx_out else None,
         policy=DeepCollectionPolicy(budget_seconds=args.resource_budget_seconds, resource_memory_limit_mb=args.resource_memory_limit_mb, resource_cpu_limit_percent=args.resource_cpu_limit_percent, correlation_window_seconds=args.correlation_window_seconds, event_history_days=args.event_history_days, max_log_total_bytes=args.max_log_total_mib * 1024 * 1024, max_log_primary_bytes=args.max_log_primary_mib * 1024 * 1024, max_log_fallback_bytes=args.max_log_fallback_mib * 1024 * 1024, log_collection_days=getattr(args, "log_days", None)),
+        model_config=model_config,
+        model_enabled=bool(getattr(args, "enable_model_assist", False)),
+        model_unavailable_reason=model_state,
     )
     connection_failure = next(
         (
@@ -287,6 +323,11 @@ def cmd_run_deep_vcenter(args: argparse.Namespace) -> None:
     print(f"Deep diagnostic record: {result.diagnostic_path}")
     if result.docx_path:
         print(f"Word report: {result.docx_path}")
+    print(f"Model analysis: {getattr(result, 'model_analysis_status', 'unavailable')}")
+    if getattr(result, "offline_evidence_zip", None):
+        print(f"Local evidence ZIP: {result.offline_evidence_zip}")
+    elif getattr(result, "offline_evidence_package_status", "") == "failed":
+        print("Local evidence ZIP: failed; see Deep diagnostic record for the sanitized failure type.")
     if connection_failure:
         raise SystemExit(2)
 
@@ -410,12 +451,14 @@ def build_parser() -> argparse.ArgumentParser:
     deep.add_argument("--dataset", required=True, help="Deep Dataset JSON 或 fixture 文件")
     deep.add_argument("--report-dir", default="out\\deep-report")
     deep.add_argument("--docx-out")
+    _add_deep_model_options(deep)
     deep.set_defaults(func=cmd_run_deep_dataset)
 
     deep_replay = sub.add_parser("run-deep-replay", help="按 Dataset manifest 时间顺序重放多个 Deep Dataset 并更新历史趋势。")
     deep_replay.add_argument("--dataset", action="append", required=True, help="Dataset JSON；可重复传入多个文件")
     deep_replay.add_argument("--report-dir", default="out\\deep-replay")
     deep_replay.add_argument("--docx-out")
+    _add_deep_model_options(deep_replay)
     deep_replay.set_defaults(func=cmd_run_deep_replay)
 
     deep_vcenter = sub.add_parser("run-deep-vcenter", help="对真实 vCenter 执行只读 Deep Core 采集并生成报告。")
@@ -431,11 +474,24 @@ def build_parser() -> argparse.ArgumentParser:
     deep_vcenter.add_argument("--log-days", type=int, choices=range(1, 366), metavar="DAYS", help="仅限定期望采集的最近日志天数（1–365）；不传则尽可能读取可提供日志，不改变事件或性能历史范围")
     deep_vcenter.add_argument("--correlation-window-seconds", type=int, default=3600, help="历史日志、事件、任务和性能证据的同对象关联窗口（1 至 86400 秒）")
     deep_vcenter.add_argument("--event-history-days", type=int, default=30, metavar="DAYS", help="EventManager 历史查询窗口（1 至 90 天）；不扩大性能数据查询窗口")
+    _add_deep_model_options(deep_vcenter)
     deep_vcenter.set_defaults(func=cmd_run_deep_vcenter)
 
     desktop = sub.add_parser("desktop")
     desktop.set_defaults(func=cmd_desktop)
     return parser
+
+
+def _add_deep_model_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--enable-model-assist",
+        action="store_true",
+        help="显式启用本地已配置模型；仅发送逐条发现及其关联证据，数据会发送到所选配置的服务端点",
+    )
+    parser.add_argument(
+        "--model-profile-id",
+        help="使用桌面配置中的指定模型档案 ID；不填写时使用默认档案，仅在 --enable-model-assist 下生效",
+    )
 
 
 def main() -> None:

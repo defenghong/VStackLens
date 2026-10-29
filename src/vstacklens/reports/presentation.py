@@ -4,6 +4,166 @@ from collections import Counter, defaultdict
 from typing import Any
 
 
+def recorded_result_summary(report, context=None) -> dict[str, Any]:
+    """Count saved object-result grades, never the current rule catalog's defaults."""
+    from vstacklens.reports.customer_caliber import approved_result_projection
+    projection = approved_result_projection(report, context)
+    rows = projection.get('object_results') or []
+    available = (projection.get('source') or {}).get('records_available', bool(rows))
+    return _recorded_summary(rows, available=available)
+
+
+def _recorded_summary(rows: list[dict[str, Any]], *, available: bool | None = None) -> dict[str, Any]:
+    from vstacklens.reports.customer_caliber import DENIED_RULES, rule_grade
+    counts = {key: 0 for key in ("passed", "failed", "unavailable", "error", "not_applicable")}
+    levels = {key: 0 for key in ("P1", "P2", "P3")}
+    unknown_grades = 0
+    for row in rows:
+        if row.get("rule_id") in DENIED_RULES:
+            continue
+        grade = rule_grade(row)  # saved risk_level, then saved rule evidence only
+        status = row.get("result_status")
+        if grade in levels and status in counts:
+            counts[status] += 1
+            if status == "failed": levels[grade] += 1
+        elif status == "failed" and not grade:
+            unknown_grades += 1
+    return {"counts": counts, "failed_levels": levels, "available": bool(rows) if available is None else bool(available), "unknown_grade_results": unknown_grades,
+            "source": "保存的当次检查结果等级", "scope": "客户可展示的 P1-P3 检查结果条数；不可用与出错单列，不等于问题类别数或去重对象数"}
+
+
+def customer_check_statistics(report, context=None) -> dict[str, Any]:
+    """One approved P1–P3 execution count for every customer renderer."""
+    from vstacklens.reports.customer_caliber import approved_result_projection, DENIED_RULES, rule_grade
+    projection = approved_result_projection(report, context)
+    rows = projection.get('object_results') or []
+    available = (projection.get('source') or {}).get('records_available', bool(rows))
+    summary = _recorded_summary(rows, available=available)
+    by_type: dict[str, dict[str, Any]] = {}
+    by_rule: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        level = rule_grade(row)
+        status = row.get('result_status')
+        if row.get('rule_id') in DENIED_RULES or level not in {'P1', 'P2', 'P3'} or status not in {'passed', 'failed'}:
+            continue
+        kind = str(row.get('object_type') or '')
+        rule_id = str(row.get('rule_id') or '')
+        type_bucket = by_type.setdefault(kind, {
+            'object_type': kind, 'label': object_type_label(kind), 'total': 0, 'passed': 0, 'failed': 0,
+            'levels': {key: 0 for key in ('P1', 'P2', 'P3')},
+        })
+        rule_bucket = by_rule.setdefault(rule_id, {
+            'rule_id': rule_id, 'rule_name': str(row.get('check_name') or row.get('rule_name') or rule_id),
+            'object_type': kind, 'total': 0, 'passed': 0, 'failed': 0,
+            'levels': {key: 0 for key in ('P1', 'P2', 'P3')},
+        })
+        for bucket in (type_bucket, rule_bucket):
+            bucket['total'] += 1
+            bucket[status] += 1
+            if status == 'failed':
+                bucket['levels'][level] += 1
+    type_rows = sorted(by_type.values(), key=lambda row: (module_sort_index(row['object_type']), row['object_type']))
+    rule_rows = sorted(by_rule.values(), key=lambda row: row['rule_id'])
+    top = []
+    for row in rule_rows:
+        if row['failed']:
+            highest = next(level for level in ('P1', 'P2', 'P3') if row['levels'][level])
+            top.append({'name': row['rule_name'], 'scope': object_type_label(row['object_type']),
+                        'failed': row['failed'], 'highest_level': highest, 'rule_id': row['rule_id']})
+    top.sort(key=lambda row: (-row['failed'], SEVERITY_ORDER[row['highest_level']], row['rule_id']))
+    passed = summary['counts']['passed']
+    failed = summary['counts']['failed']
+    total = passed + failed
+    return {
+        'total': total, 'passed': passed, 'failed': failed,
+        'text': f'本次共检查 {total} 条，通过 {passed} 条，未通过 {failed} 条。' if summary['available'] else '',
+        'available': summary['available'],
+        'levels': summary['failed_levels'], 'by_object_type_rows': type_rows,
+        'by_rule_rows': rule_rows, 'top_failed_checks': top[:5],
+        'total_label': '检查总数', 'scope_label': '本次检查结果',
+    }
+
+
+def certificate_consistency_notes(report) -> list[str]:
+    """Flag contradictory original dates/days without rejudging saved health."""
+    from datetime import date
+    try: captured = date.fromisoformat(str(report.report_info.generated_at)[:10])
+    except ValueError: return []
+    notes = []
+    for kind, prefix in (("vCenter", ""), ("HostSystem", "host_")):
+        for row in (report.asset_inventory.get("details") or {}).get(kind, []):
+            p = row.get("properties") or {}
+            expiry = p.get(prefix + "certificate_not_after") or p.get(prefix + "certificate_expiration_date")
+            days = p.get(prefix + "certificate_days_remaining")
+            if expiry and isinstance(days, (float, int)) and not isinstance(days, bool):
+                try: difference = (date.fromisoformat(str(expiry)[:10]) - captured).days
+                except ValueError: continue
+                if abs(difference - days) > 1:
+                    notes.append(f"原始证书数据不一致：{row.get('object_name') or kind} 到期日 {str(expiry)[:10]} 与记录的剩余 {days:g} 天不对应；保留原始日期、天数及历史结论，请复核采集口径。")
+    return notes
+
+
+def customer_judgment_metadata(report) -> dict[str, str]:
+    """Keep historical/reinterpretation identity separate from collection diagnostics."""
+    provenance = (report.customer_caliber or {}).get("judgment_provenance") or {}
+    mode = str(provenance.get("mode") or "RECORDED_RESULT")
+    boundary = str(provenance.get("limitation") or "") if mode in {"ORIGINAL_WITH_LIMITS", "EXPLICIT_REINTERPRETATION"} else ""
+    return {"mode": mode, "boundary": boundary}
+
+
+def delivery_overview(report) -> dict[str, Any]:
+    """Read-only customer opening; use stored caliber, never reinterpret rules."""
+    caliber = report.customer_caliber or {}
+    counts = dict(report.environment_summary.result_status_summary or {})
+    unavailable = int(counts.get("unavailable", 0) or 0)
+    errors = int(counts.get("error", 0) or 0)
+    limits = []
+    if unavailable or errors:
+        limits.append(f"本次有 {unavailable} 条检查记录不可用、{errors} 条检查记录出错；未取得证据的部分不能视为正常。")
+    if report.health_score.assessment_limited:
+        limits.append("检查证据不足，当前结论不代表已完成全部检查；建议补齐采集范围或权限后复核。")
+    for item in report.appendix.get("unavailable_rules", []) or []:
+        if isinstance(item, dict):
+            reason = item.get("reason") or item.get("unavailable_reason") or item.get("message")
+            if reason and str(reason) not in limits: limits.append(str(reason))
+    provenance = (caliber.get("judgment_provenance") or {}).get("limitation")
+    if provenance and provenance not in limits: limits.append(provenance)
+    recorded = recorded_result_summary(report)
+    if recorded["unknown_grade_results"]:
+        limits.append(f"有 {recorded['unknown_grade_results']} 条原始未通过记录的当次等级未保存，不能计入 P1-P3 等级统计；保留原始结论，不能据此确认正常。")
+    limits.extend(certificate_consistency_notes(report))
+    details = (report.asset_inventory.get("details") or {}).get("vCenter", [])
+    if any((x.get("properties") or {}).get("collection_mode") == "connection_failed" for x in details):
+        limits.insert(0, "本次连接未成功，未取得环境清单；仅能记录诊断信息，不能据此确认环境实际运行健康。")
+    categories = list(caliber.get("categories") or report.problem_categories or [])
+    categories.sort(key=lambda x: ({"P1": 0, "P2": 1, "P3": 2}.get(x.get("priority") or x.get("risk_level"), 3), x.get("title", "")))
+    priorities = [dict(title=x.get("title", ""), level=x.get("priority") or x.get("risk_level") or "",
+                       objects=x.get("affected_object_count", 0), suggestion=x.get("remediation_zh") or x.get("remediation") or "请结合原始证据复核。") for x in categories[:5]]
+    from vstacklens.reports.customer_view import customer_category_title, customer_environment_name, customer_wording
+    for item, category in zip(priorities, categories[:5]):
+        item['title'] = customer_category_title(str(category.get('category_id') or ''), item['title'])
+        if category.get('category_id') == 'VM-SNAPSHOT' and any(
+            row.get('category_id') == 'VM-SNAPSHOT' and row.get('rule_id') == 'VSL-VM-001'
+            for row in caliber.get('findings', [])
+        ):
+            item['suggestion'] = '保留 7 天及以上的快照需核对业务保留要求；' + item['suggestion']
+    for item in priorities:
+        item['suggestion'] = customer_wording(item['suggestion'])
+    customer_limits = certificate_consistency_notes(report)
+    boundary = customer_judgment_metadata(report)["boundary"]
+    if boundary and boundary not in customer_limits:
+        customer_limits.append(boundary)
+    return dict(customer=report.customer_info.customer_name, environment=customer_environment_name(report.customer_info.site_name),
+                target=report.customer_info.vcenter, time=report.report_info.generated_at,
+                scope=customer_wording(report.environment_summary.scope_statement),
+                conclusion=report.overall_status or report.health_score.label,
+                explanation=customer_wording(report.health_score.explanation),
+                check_counts={key:value for key,value in recorded['counts'].items() if key in {'passed','failed'}} if recorded['available'] else {},
+                limitations=customer_limits, priorities=priorities, recorded_results={
+                    'available':recorded['available'], 'failed_levels':recorded['failed_levels'],
+                    'counts':{key:value for key,value in recorded['counts'].items() if key in {'passed','failed'}}})
+
+
 OBJECT_TYPE_LABELS = {
     "vCenter": "vCenter 管理平台",
     "ClusterComputeResource": "集群",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import ssl
 import socket
 import tempfile
@@ -17,6 +18,7 @@ from typing import Any, Callable
 
 from vstacklens.collection.collection_plan import CollectionPlan
 from vstacklens.core.context import RunContext
+from vstacklens.collection.license_state import query_entity_license, fields as license_fields, expiration_state
 
 
 VSAN_DATASTORE_USED_WARNING_PERCENT = 80.0
@@ -98,7 +100,9 @@ class PyVmomiCollector:
         self.ssl_verify = ssl_verify
         self.timeout = timeout
         self.cancel_requested = lambda: False
+        self.identity_validator = None
         self._collection_warnings: list[dict[str, Any]] = []
+        self._collection_diagnostics: list[dict[str, Any]] = []
         self._service_instance: Any | None = None
         self._rest_session_id: str | None = None
         self._rest_policy_cache: dict[str, dict[str, Any]] = {}
@@ -108,6 +112,7 @@ class PyVmomiCollector:
             "source": "vcenter_rest.GET /api/vcenter/vm/{vm}/storage/policy/compliance",
         }
         self._vsan_policy_by_object_uuid: dict[str, dict[str, Any]] = {}
+        self._property_snapshot_audit: dict[str, Any] = {}
 
     def collect_vsan_management_inventory(
         self,
@@ -121,13 +126,17 @@ class PyVmomiCollector:
         evidence has the same API semantics as the standard inventory path.
         """
 
-        return self._collect_vsan_inventory(
+        result = self._collect_vsan_inventory(
             service_instance,
             clusters,
             vms,
             include_storage_policy=False,
             include_object_inventory=False,
         )
+        result["api_diagnostics"] = list(self._collection_diagnostics)
+        if result.get("status") == "collected" and self._collection_diagnostics:
+            result["status"] = "partial"
+        return result
 
     def precheck(self) -> None:
         try:
@@ -140,7 +149,9 @@ class PyVmomiCollector:
             ssl_context = ssl._create_unverified_context()  # noqa: SLF001 - explicit customer-configurable option
         service_instance = self._smart_connect(SmartConnect, ssl_context)
         try:
-            service_instance.RetrieveContent()
+            content = service_instance.RetrieveContent()
+            if self.identity_validator:
+                self.identity_validator(str(getattr(getattr(content, "about", None), "instanceUuid", "") or ""))
         finally:
             self._rest_session_id = None
             self._rest_policy_cache = {}
@@ -155,6 +166,7 @@ class PyVmomiCollector:
         progress: Callable[[str, int], None] | None = None,
     ) -> dict[str, Any]:
         self._collection_warnings = []
+        self._collection_diagnostics = []
         self._rest_session_id = None
         self._rest_policy_cache = {}
         self._rest_policy_names = {}
@@ -163,9 +175,11 @@ class PyVmomiCollector:
             "source": "vcenter_rest.GET /api/vcenter/vm/{vm}/storage/policy/compliance",
         }
         self._vsan_policy_by_object_uuid = {}
+        self._property_snapshot_audit = {}
         try:
             from pyVim.connect import Disconnect, SmartConnect
             from pyVmomi import vim
+            from vstacklens.collection.property_snapshot import begin_scope, SnapshotCancelledError
         except ImportError as exc:
             raise RuntimeError("pyVmomi is not installed. Install with: python -m pip install -e .") from exc
 
@@ -173,19 +187,51 @@ class PyVmomiCollector:
         if not self.ssl_verify:
             ssl_context = ssl._create_unverified_context()  # noqa: SLF001 - explicit customer-configurable option
 
-        service_instance = self._smart_connect(SmartConnect, ssl_context)
-        self._service_instance = service_instance
+        connected_instance = self._smart_connect(SmartConnect, ssl_context)
+        # One observation scope belongs to this authenticated connection and run.
+        # Runtime, guest and alarm properties deliberately keep their original reads.
+        snapshot_events: list[dict[str, Any]] = []
+        snapshot = None
+        objects: list[dict[str, Any]] = []
+        instance_uuid: str | None = None
         try:
+            snapshot = begin_scope(
+                getattr(connected_instance, "_stub", None),
+                cache_paths_by_type={
+                    vim.ManagedEntity: ("name", "parent"),
+                    vim.ClusterComputeResource: ("configurationEx", "host", "datastore"),
+                    vim.HostSystem: ("config", "hardware", "vm", "configManager"),
+                    vim.Datastore: ("summary", "host", "info"),
+                    vim.VirtualMachine: ("config", "datastore", "snapshot"),
+                    vim.DistributedVirtualSwitch: ("config", "uuid"),
+                    vim.dvs.DistributedVirtualPortgroup: ("config", "key"),
+                },
+                cancelled=self.cancel_requested,
+                warning=snapshot_events.append,
+            )
+            service_instance = snapshot.bind(connected_instance) if snapshot is not None else connected_instance
+            self._service_instance = service_instance
             content = service_instance.RetrieveContent()
+            instance_uuid = str(getattr(getattr(content, "about", None), "instanceUuid", "") or "") or None
+            if self.identity_validator:
+                self.identity_validator(instance_uuid or "")
             self._emit_progress(progress, "collecting_environment", 20)
             self._emit_progress(progress, "collecting_clusters", 25)
             clusters = self._collect_view(content, vim.ClusterComputeResource, lambda item: item)
+            if snapshot is not None:
+                snapshot.prefetch(content.propertyCollector, clusters)
             self._emit_progress(progress, "collecting_hosts", 30)
             hosts = self._collect_view(content, vim.HostSystem, lambda item: item)
+            if snapshot is not None:
+                snapshot.prefetch(content.propertyCollector, hosts)
             host_license_map = self._host_license_assignments(content, hosts)
             self._emit_progress(progress, "collecting_storage_network", 38)
             datastores = self._collect_view(content, vim.Datastore, lambda item: item)
+            if snapshot is not None:
+                snapshot.prefetch(content.propertyCollector, datastores)
             distributed_portgroups = self._collect_distributed_portgroups(content, vim)
+            if snapshot is not None:
+                snapshot.prefetch(content.propertyCollector, distributed_portgroups)
             try:
                 distributed_portgroup_index = self._distributed_portgroup_index(distributed_portgroups)
             except Exception as exc:  # noqa: BLE001 - optional DVS labels must not stop inventory collection
@@ -193,6 +239,8 @@ class PyVmomiCollector:
                 distributed_portgroup_index = {}
             self._emit_progress(progress, "collecting_vms", 45)
             vms = self._collect_view(content, vim.VirtualMachine, lambda item: item)
+            if snapshot is not None:
+                snapshot.prefetch(content.propertyCollector, vms)
             self._emit_progress(progress, "collecting_alarms_permissions", 52)
             perf = _PerformanceSampler(content, plan)
             self._emit_progress(progress, "collecting_permissions", 53)
@@ -210,7 +258,6 @@ class PyVmomiCollector:
             except Exception as exc:  # noqa: BLE001 - optional DVS enrichment must not abort the inspection
                 self._record_collection_warning("distributed_portgroup_security", exc)
                 distributed_portgroup_security = {}
-            objects: list[dict[str, Any]] = []
             self._emit_progress(progress, "building_vcenter_summary", 54)
             objects.append(
                 self._vcenter_object(
@@ -221,6 +268,8 @@ class PyVmomiCollector:
             )
             self._emit_progress(progress, "building_cluster_objects", 55)
             for cluster in clusters:
+                if self.cancel_requested():
+                    return {"objects": objects, "collection_status": "cancelled", "collection_warnings": self._collection_warnings}
                 try:
                     objects.append(self._cluster_object(cluster, perf))
                 except Exception as exc:  # noqa: BLE001 - one slow cluster must not abort the inspection.
@@ -251,6 +300,8 @@ class PyVmomiCollector:
                                         "object_name": host_name, "properties": {"collection_status": "failed"}})
             self._emit_progress(progress, "building_storage_objects", 57)
             for datastore in datastores:
+                if self.cancel_requested():
+                    return {"objects": objects, "collection_status": "cancelled", "collection_warnings": self._collection_warnings}
                 try:
                     objects.append(self._datastore_object(datastore, perf, vsan_inventory))
                 except Exception as exc:  # noqa: BLE001 - preserve coverage and mark this object unknown.
@@ -259,21 +310,56 @@ class PyVmomiCollector:
             self._emit_progress(progress, "building_vm_objects", 58)
             vm_total = max(len(vms), 1)
             for index, vm in enumerate(vms, start=1):
-                if index == 1 or index == vm_total or index % 50 == 0:
-                    percent = 58 + min(1, int(index * 2 / vm_total))
-                    self._emit_progress(progress, "building_vm_objects", percent)
+                if self.cancel_requested():
+                    return {"objects": objects, "collection_status": "cancelled", "collection_warnings": self._collection_warnings}
+                # An object count remains meaningful even when the integer percent
+                # has not changed. Emit after each completed object, too.
+                self._emit_progress(progress, f"building_vm_objects:{index - 1}/{len(vms)}", 58 + min(1, int((index - 1) * 2 / vm_total)))
                 try:
                     objects.append(self._vm_object(vm, vim, perf, content))
                 except Exception as exc:  # noqa: BLE001 - preserve the rest of a large VM inventory.
                     self._record_collection_warning("vm_object", exc)
                     objects.append(self._failed_inventory_object(vm, "VirtualMachine"))
-            return {"objects": objects, "collection_warnings": self._collection_warnings, "collection_status": "degraded" if self._collection_warnings else "collected"}
+                self._emit_progress(progress, f"building_vm_objects:{index}/{len(vms)}", 58 + min(1, int(index * 2 / vm_total)))
+            return {"objects": objects, "collection_warnings": self._collection_warnings, "collection_diagnostics": self._collection_diagnostics, "collection_status": "degraded" if self._collection_warnings else "collected"}
+        except SnapshotCancelledError:
+            return {"objects": objects, "collection_status": "cancelled", "collection_warnings": self._collection_warnings, "collection_diagnostics": self._collection_diagnostics}
         finally:
-            self._rest_session_id = None
-            self._rest_policy_cache = {}
-            self._rest_policy_names = {}
-            self._service_instance = None
-            Disconnect(service_instance)
+            try:
+                if snapshot is not None:
+                    self._capture_property_snapshot_audit(snapshot, context, instance_uuid, snapshot_events, objects)
+            finally:
+                try:
+                    if snapshot is not None:
+                        snapshot.close()
+                finally:
+                    self._rest_session_id = None
+                    self._rest_policy_cache = {}
+                    self._rest_policy_names = {}
+                    self._service_instance = None
+                    Disconnect(connected_instance)
+
+    def _capture_property_snapshot_audit(self, snapshot, context, instance_uuid, events, objects) -> None:
+        observations = snapshot.observations
+        self._property_snapshot_audit = {
+            "run_id": context.run_id,
+            "vcenter_instance_uuid": instance_uuid,
+            "counters": snapshot.counters,
+            "observations": observations,
+            "events": events,
+        }
+        by_identity: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for observation in observations:
+            identity = (observation["sdk_type"].rsplit(".", 1)[-1], observation["moid"])
+            by_identity.setdefault(identity, []).append(observation)
+        for item in objects:
+            observed = by_identity.get((item["object_type"], item["object_key"]))
+            if observed:
+                item.setdefault("properties", {})["sdk_property_observations"] = {
+                    "run_id": context.run_id,
+                    "vcenter_instance_uuid": instance_uuid,
+                    "fields": observed,
+                }
 
     def _emit_progress(self, progress: Callable[[str, int], None] | None, stage: str, percent: int) -> None:
         if progress:
@@ -314,6 +400,9 @@ class PyVmomiCollector:
             return None
 
     def _record_collection_warning(self, context: str, exc: Exception) -> None:
+        from vstacklens.collection.diagnostics import exception_details
+        details = exception_details(exc, secrets=(self.username, self.password, self._rest_session_id or ""), context=context)
+        self._collection_diagnostics.append(details)
         warning = {
             "context": self._safe_warning_context(context),
             "status": self._exception_status(exc),
@@ -486,7 +575,7 @@ class PyVmomiCollector:
                 ),
                 "collection_warnings": self._collection_warnings,
                 "certificate_days_remaining": self._certificate_days_remaining(),
-                "license_days_remaining": self._license_days_remaining(content),
+                **self._vcenter_license_fields(content),
                 "vcenter_admin_account_count": None if admin_principals is None else len(admin_principals),
                 "vcenter_admin_principals": admin_principals,
                 "task_backlog_count": None if task_backlog is None else len(task_backlog),
@@ -634,6 +723,7 @@ class PyVmomiCollector:
                 "host_certificate_fingerprint": certificate_info.get("fingerprint"),
                 "host_certificate_probe_method": certificate_info.get("probe_method"),
                 "host_certificate_probe_status": certificate_info.get("probe_status"),
+                **license_info,
                 "host_license_assigned": license_info.get("host_license_assigned"),
                 "host_license_name": license_info.get("host_license_name"),
                 "host_license_edition": license_info.get("host_license_edition"),
@@ -2915,7 +3005,7 @@ class PyVmomiCollector:
             api_status = self._merge_api_status(api_status, self._exception_status(exc))
             errors.append(self._exception_message(exc))
         health_issues = self._extract_vsan_health_issues(health_summary)
-        object_issues = self._extract_vsan_object_issues(health_summary)
+        object_issues = self._vsan_object_issues_from_health_issues(health_issues)
 
         disk_issues: list[dict[str, Any]] | None = []
         disk_inventory: dict[str, Any] = {"disk_group_count": None, "cache_disk_count": None, "capacity_disk_count": None, "disk_topology": None}
@@ -3459,12 +3549,16 @@ class PyVmomiCollector:
         return self._dedupe_issue_dicts(issues)
 
     def _extract_vsan_object_issues(self, summary: Any) -> list[dict[str, Any]] | None:
-        health_issues = self._extract_vsan_health_issues(summary)
+        return self._vsan_object_issues_from_health_issues(self._extract_vsan_health_issues(summary))
+
+    def _vsan_object_issues_from_health_issues(
+        self, health_issues: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]] | None:
         if health_issues is None:
             return None
         object_terms = ("object", "component", "compliance", "inaccessible", "对象", "组件", "合规")
         return [
-            issue
+            dict(issue)
             for issue in health_issues
             if any(term in f"{issue.get('component', '')} {issue.get('summary', '')}".casefold() for term in object_terms)
         ]
@@ -3626,25 +3720,19 @@ class PyVmomiCollector:
         return candidate if priority.get(candidate, 3) > priority.get(current, 3) else current
 
     def _exception_status(self, exc: Exception) -> str:
-        text = f"{type(exc).__name__} {exc}".casefold()
-        if "nopermission" in text or "no permission" in text or "permission" in text or "notauthenticated" in text or "securityerror" in text:
-            return "permission_denied"
-        if isinstance(exc, ImportError):
-            return "unsupported"
-        if "not supported" in text or "not_supported" in text or "unsupported" in text or "methodnotfound" in text:
-            return "unsupported"
-        if isinstance(exc, (TimeoutError, socket.timeout)) or "timeout" in text or "timed out" in text:
-            return "unavailable"
-        if isinstance(exc, (ssl.SSLError, OSError)) or "ssl" in text or "certificate" in text or "unavailable" in text:
-            return "unavailable"
-        return "api_error"
+        from vstacklens.collection.diagnostics import exception_category
+        category = exception_category(exc)
+        return "unavailable" if category in {"timeout", "connection_error", "certificate_verification_failed"} else category
 
     def _exception_message(self, exc: Exception) -> str:
+        self._record_collection_warning("vsan.optional_api", exc)
         reason = {
             "permission_denied": "permission_denied",
             "unsupported": "unsupported",
             "unavailable": self._unavailable_reason(exc),
             "api_error": "api_error",
+            "authentication_failed": "authentication_failed",
+            "dependency_missing": "dependency_missing",
         }.get(self._exception_status(exc), "api_error")
         return f"vSAN API unavailable: {reason}"
 
@@ -3670,6 +3758,8 @@ class PyVmomiCollector:
                 ssl._create_default_https_context = previous_context  # noqa: SLF001
 
     def _walk_public_objects(self, value: Any, depth: int = 0, seen: set[int] | None = None) -> list[Any]:
+        from pyVmomi.VmomiSupport import DataObject, ManagedObject
+
         if seen is None:
             seen = set()
         if value is None or depth > 5:
@@ -3687,22 +3777,34 @@ class PyVmomiCollector:
             iterable = value
         else:
             items.append(value)
-            iterable = []
-            for name in dir(value):
-                if name.startswith("_") or name in {"dynamicType", "dynamicProperty"}:
-                    continue
-                try:
-                    attr = getattr(value, name)
-                except Exception:  # noqa: BLE001 - pyVmomi properties can be lazy/faulted
-                    continue
-                if callable(attr):
-                    continue
-                iterable.append(attr)
+            if isinstance(value, ManagedObject):
+                # A vSAN result contains vCenter references on a /vsanHealth
+                # stub. Preserve the original reference (type, MOID and stub),
+                # but do not resolve unrelated remote inventory through it.
+                # Health and disk evidence lives in the returned DataObjects;
+                # required inventory properties use the vCenter collector.
+                return items
+            if isinstance(value, DataObject):
+                names = (prop.name for prop in type(value)._GetPropertyList())
+            else:
+                # Local record/test-double support. Do not evaluate arbitrary
+                # descriptors as dir/getattr did for lazy SDK properties.
+                names = vars(value).keys() if hasattr(value, "__dict__") else ()
+            iterable = [
+                getattr(value, name)
+                for name in sorted(names)
+                if not name.startswith("_") and name not in {"dynamicType", "dynamicProperty"}
+            ]
+            iterable = [attr for attr in iterable if not callable(attr)]
         for child in iterable:
             items.extend(self._walk_public_objects(child, depth + 1, seen))
         return items
 
     def _vsan_status_from_object(self, item: Any) -> str | None:
+        from pyVmomi.VmomiSupport import ManagedObject
+
+        if isinstance(item, ManagedObject):
+            return None
         for name in (
             "health",
             "healthState",
@@ -3722,7 +3824,11 @@ class PyVmomiCollector:
         return None
 
     def _string_status(self, value: Any) -> str | None:
+        from pyVmomi.VmomiSupport import ManagedObject
+
         if value is None:
+            return None
+        if isinstance(value, ManagedObject):
             return None
         for attr in ("key", "label", "value", "name"):
             nested = getattr(value, attr, None)
@@ -4243,124 +4349,102 @@ class PyVmomiCollector:
             return "lockdownStrict"
         return raw
 
-    def _license_days_remaining(self, content: Any) -> int | None:
-        license_manager = getattr(content, "licenseManager", None)
-        if license_manager is None:
-            return None
+    def _vcenter_license_fields(self, content: Any) -> dict[str, Any]:
         try:
-            licenses = getattr(license_manager, "licenses", None) or []
-        except Exception:  # noqa: BLE001 - unavailable property should become data_quality missing
-            return None
-        if not licenses:
-            return None
-        explicit_days: list[int] = []
-        perpetual_seen = False
-        for license_info in licenses:
-            expiration = self._extract_license_expiration(license_info)
-            if expiration is None:
-                perpetual_seen = True
-                continue
-            if expiration.tzinfo is None:
-                expiration = expiration.replace(tzinfo=UTC)
-            explicit_days.append((expiration.astimezone(UTC) - datetime.now(UTC)).days)
-        if explicit_days:
-            return min(explicit_days)
-        if perpetual_seen:
-            return 999999
-        return None
+            instance_uuid = str(getattr(getattr(content, "about", None), "instanceUuid", "") or "")
+        except Exception as exc:
+            state = query_entity_license(None, "", "vCenter", "", now=datetime.now(UTC))
+            state.update(query_status="permission_denied" if isinstance(exc, PermissionError) or "NoPermission" in type(exc).__name__ else "read_failed",
+                         error_type=type(exc).__name__, reason="vCenter 实体身份读取失败，不能查询分配", expiration_state="read_failed")
+            self._record_license_diagnostic(state)
+            return license_fields(state)
+        state = query_entity_license(content, instance_uuid, "vCenter", instance_uuid, now=datetime.now(UTC))
+        self._record_license_diagnostic(state)
+        return license_fields(state)
+
+    def _record_license_diagnostic(self, state: dict[str, Any]) -> None:
+        if state.get("query_status") == "success" and state.get("expiration_state") in {"dated", "perpetual", "not_assigned"}:
+            return
+        details = {"context": "license." + str(state.get("entity_id") or "identity"),
+                   "status": state.get("query_status") if state.get("query_status") != "success" else state.get("expiration_state"),
+                   "error_type": state.get("error_type") or "LicenseEvidenceInsufficient",
+                   "message": state.get("reason"), "degraded": True}
+        # Preserve the fault class and affected field, never the fault body/licenseKey.
+        self._collection_diagnostics.append(dict(details))
+        if details not in self._collection_warnings and len(self._collection_warnings) < 200:
+            self._collection_warnings.append(dict(details))
+
+    def _license_days_remaining(self, content: Any) -> int | None:
+        """Compatibility scalar, derived only from the target's actual assignment."""
+        return self._vcenter_license_fields(content)["license_days_remaining"]
 
     def _host_license_assignments(self, content: Any, hosts: list[Any]) -> dict[str, dict[str, Any]]:
-        result: dict[str, dict[str, Any]] = {}
-        license_manager = getattr(content, "licenseManager", None)
-        assignment_manager = getattr(license_manager, "licenseAssignmentManager", None) if license_manager else None
-        assignments_by_entity: dict[str, Any] = {}
-        if assignment_manager is not None:
-            try:
-                assignments = assignment_manager.QueryAssignedLicenses()
-            except Exception:  # noqa: BLE001 - assignment manager may be restricted
-                assignments = None
-            for assignment in assignments or []:
-                entity_id = str(getattr(assignment, "entityId", "") or "")
-                if entity_id:
-                    assignments_by_entity[entity_id] = assignment
-
+        identity_error = None
+        try:
+            instance_uuid = str(getattr(getattr(content, "about", None), "instanceUuid", "") or "")
+        except Exception as exc:
+            instance_uuid = ""
+            identity_error = exc
+        result = {}
         for host in hosts:
+            if self.cancel_requested():
+                break
             moid = str(getattr(host, "_moId", "") or "")
-            assignment = assignments_by_entity.get(moid)
-            if assignment is None:
+            state = query_entity_license(content, moid, "HostSystem", instance_uuid, now=datetime.now(UTC))
+            if identity_error is not None:
+                state.update(query_status="permission_denied" if isinstance(identity_error, PermissionError) or "NoPermission" in type(identity_error).__name__ else "read_failed",
+                             error_type=type(identity_error).__name__, reason="vCenter 实体身份读取失败，不能核对主机分配", expiration_state="read_failed")
+            self._record_license_diagnostic(state)
+            value = license_fields(state, host=True)
+            if state["assignment_status"] == "unknown":
                 fallback = self._host_license_from_config(host)
-                fallback["host_license_probe_status"] = (
-                    "未在 licenseAssignmentManager 中找到主机授权记录，已尝试读取主机产品信息"
-                )
-                result[moid] = fallback
-                continue
-            license_info = getattr(assignment, "assignedLicense", None)
-            result[moid] = self._license_info_to_host_fields(license_info, "已从 licenseAssignmentManager 采集授权记录")
+                for key in ("host_license_required_product_name", "host_license_required_product_version"):
+                    value[key] = fallback.get(key)
+                # Required product metadata is not the actually assigned license name/version.
+            result[moid] = value
         return result
 
     def _host_license_from_config(self, host: Any) -> dict[str, Any]:
-        product = getattr(getattr(host, "config", None), "product", None)
-        product_name = getattr(product, "licenseProductName", None) if product else None
-        if not product_name:
-            return {
-                "host_license_assigned": None,
-                "host_license_name": None,
-                "host_license_edition": None,
-                "host_license_is_evaluation": None,
-                "host_license_expiration_date": None,
-                "host_license_expiration_days": None,
-                "host_license_probe_status": "当前 vCenter 未返回主机授权信息字段",
-            }
-        text = str(product_name)
-        return {
-            "host_license_assigned": True,
-            "host_license_name": text,
-            "host_license_edition": self._license_edition_from_text(text),
-            "host_license_is_evaluation": "eval" in text.lower() or "evaluation" in text.lower(),
-            "host_license_expiration_date": "永久授权",
-            "host_license_expiration_days": 999999,
-            "host_license_probe_status": "已从主机 product.licenseProductName 采集授权名称，未发现到期字段",
+        state = {
+            "schema": "entity-license-v1", "entity_id": str(getattr(host, "_moId", "") or ""),
+            "assignment_status": "unknown", "assigned": None, "expiration_state": "unknown",
+            "reason": "仅有主机产品信息，不能确认授权分配与到期状态",
+            "source": "HostSystem.config.product", "query_status": "not_queried",
         }
+        try:
+            product = getattr(getattr(host, "config", None), "product", None)
+            state["required_product_name"] = getattr(product, "licenseProductName", None) if product else None
+            state["required_product_version"] = getattr(product, "licenseProductVersion", None) if product else None
+        except Exception as exc:
+            state.update(reason="主机产品字段读取失败", error_type=type(exc).__name__, expiration_state="read_failed")
+        result = license_fields(state, host=True)
+        result["host_license_required_product_name"] = state.get("required_product_name")
+        result["host_license_required_product_version"] = state.get("required_product_version")
+        return result
 
     def _license_info_to_host_fields(self, license_info: Any, probe_status: str) -> dict[str, Any]:
-        if license_info is None:
-            return {
-                "host_license_assigned": False,
-                "host_license_name": "未分配",
-                "host_license_edition": "",
-                "host_license_is_evaluation": False,
-                "host_license_expiration_date": None,
-                "host_license_expiration_days": None,
-                "host_license_probe_status": probe_status,
-            }
-        name = str(getattr(license_info, "name", "") or getattr(license_info, "licenseKey", "") or "已分配授权")
-        edition = self._license_property(license_info, {"edition", "editionkey", "productname", "name"}) or self._license_edition_from_text(name)
-        expiration = self._extract_license_expiration(license_info)
-        if expiration is None:
-            expiration_date = "永久授权"
-            expiration_days = 999999
-        else:
-            if expiration.tzinfo is None:
-                expiration = expiration.replace(tzinfo=UTC)
-            expiration_utc = expiration.astimezone(UTC)
-            expiration_date = expiration_utc.strftime("%Y-%m-%d")
-            expiration_days = (expiration_utc - datetime.now(UTC)).days
-        lowered = " ".join([name, str(edition or ""), str(self._license_property(license_info, {"feature", "type"}) or "")]).lower()
-        return {
-            "host_license_assigned": True,
-            "host_license_name": name,
-            "host_license_edition": str(edition or ""),
-            "host_license_is_evaluation": "eval" in lowered or "evaluation" in lowered,
-            "host_license_expiration_date": expiration_date,
-            "host_license_expiration_days": expiration_days,
-            "host_license_probe_status": probe_status,
-        }
+        """An unbound LicenseInfo is not proof that this host has that license."""
+        state = {"schema": "entity-license-v1", "assignment_status": "unknown", "assigned": None,
+                 "expiration_state": "unknown", "reason": probe_status + "；缺少目标实体分配关系",
+                 "source": "unbound LicenseInfo", "query_status": "not_queried"}
+        try:
+            state["unbound_name"] = getattr(license_info, "name", None) if license_info is not None else None
+            state["unbound_edition"] = getattr(license_info, "editionKey", None) if license_info is not None else None
+        except Exception as exc:
+            state.update(error_type=type(exc).__name__, reason="许可证字段读取失败，且缺少目标实体分配关系")
+        result = license_fields(state, host=True)
+        result["host_license_unbound_name"] = state.get("unbound_name")
+        result["host_license_unbound_edition"] = state.get("unbound_edition")
+        return result
 
     def _license_property(self, license_info: Any, keys: set[str]) -> Any:
-        for prop in getattr(license_info, "properties", []) or []:
-            key = str(getattr(prop, "key", "") or "").lower()
-            if key in keys:
-                return getattr(prop, "value", None)
+        try:
+            for prop in getattr(license_info, "properties", []) or []:
+                key = str(getattr(prop, "key", "") or "").lower()
+                if key in keys:
+                    return getattr(prop, "value", None)
+        except Exception as exc:  # noqa: BLE001 - restricted license metadata must remain unknown.
+            self._record_collection_warning("license.properties", exc)
         return None
 
     def _license_edition_from_text(self, value: str) -> str:
@@ -4371,20 +4455,13 @@ class PyVmomiCollector:
         return value
 
     def _extract_license_expiration(self, license_info: Any) -> datetime | None:
-        direct = getattr(license_info, "expirationDate", None)
-        if isinstance(direct, datetime):
-            return direct
-        for prop in getattr(license_info, "properties", []) or []:
-            key = str(getattr(prop, "key", "")).lower()
-            value = getattr(prop, "value", None)
-            if "expir" not in key:
-                continue
-            if isinstance(value, datetime):
-                return value
-            parsed = self._parse_datetime(value)
-            if parsed:
-                return parsed
-        return None
+        return self._license_expiration_state(license_info)[0]
+
+    def _license_expiration_state(self, license_info: Any) -> tuple[datetime | None, bool]:
+        state = expiration_state(license_info)
+        if state["state"] == "dated":
+            return datetime.fromisoformat(state["expiration_at"]), False
+        return None, state["state"] == "perpetual"
 
     def _certificate_days_remaining(self) -> int | None:
         ssl_context = ssl.create_default_context()
@@ -4617,21 +4694,41 @@ class _PerformanceSampler:
         reverse_counter_ids = {value: key for key, value in self.counter_ids.items()}
         for entity_metric in entity_metrics or []:
             sample_info = getattr(entity_metric, "sampleInfo", []) or []
-            intervals = [int(getattr(sample, "interval", 300) or 300) for sample in sample_info]
             for series in getattr(entity_metric, "value", []) or []:
                 series_values = list(getattr(series, "value", []) or [])
                 counter_id = getattr(getattr(series, "id", None), "counterId", None)
                 counter_name = reverse_counter_ids.get(counter_id, "")
                 for index, raw_value in enumerate(series_values):
-                    interval = intervals[index] if index < len(intervals) else 300
-                    values.append((float(raw_value), interval, counter_name))
+                    # A value is meaningful only with its actual sample. Never
+                    # invent a 300-second interval or convert missing values to 0.
+                    if index >= len(sample_info):
+                        continue
+                    sample = sample_info[index]
+                    interval = getattr(sample, "interval", None)
+                    timestamp = getattr(sample, "timestamp", None)
+                    if not isinstance(interval, int) or isinstance(interval, bool) or interval <= 0:
+                        continue
+                    if not isinstance(timestamp, datetime):
+                        continue
+                    try:
+                        if not start < timestamp <= end:
+                            continue
+                    except TypeError:  # timezone information is unavailable
+                        continue
+                    if not isinstance(raw_value, (int, float)) or isinstance(raw_value, bool):
+                        continue
+                    value = float(raw_value)
+                    if not math.isfinite(value) or value < 0:
+                        continue
+                    values.append((value, interval, counter_name))
         return values
 
     def _is_percent_metric(self, counter_name: str) -> bool:
         return counter_name in {"cpu.usage.average", "mem.usage.average"}
 
     def _normalize_percent(self, value: float) -> float:
-        return value / 100 if value > 100 else value
+        # vSphere percent counters are fixed point: 100 means 1%, even at low load.
+        return value / 100
 
     def _cpu_ready_percent(self, summation_ms: float, interval_seconds: int) -> float:
         if interval_seconds <= 0:

@@ -5,6 +5,7 @@ VStackLens 0.2.8 is a local VMware vSphere inspection and reporting framework wi
 ## Features
 
 - Run rule-based vSphere inspections from the CLI or Windows desktop app.
+- Keep local environment profiles and run batch or scheduled inspections.
 - Analyze VMware support bundles locally.
 - Generate offline HTML, Word, and PDF reports.
 - Run deeper health, risk, performance, and hardware-compatibility checks when the required evidence and datasets are available.
@@ -26,7 +27,7 @@ See available CLI commands with:
 
 ## HCL and VCG data
 
-VStackLens includes code for downloading and importing HCL/VCG data. We cannot include Broadcom VMware data bundles or test fixtures copied from those datasets because we do not have permission to redistribute them. The download and import code is included below, with links to Broadcom's official data sources.
+VStackLens includes code for downloading and importing HCL/VCG data. We cannot include Broadcom VMware data bundles or test fixtures copied from those datasets because we do not have permission to redistribute them. The download and import code remains in this project; links to Broadcom's official data sources are below.
 
 You can obtain data directly from Broadcom through these official channels:
 

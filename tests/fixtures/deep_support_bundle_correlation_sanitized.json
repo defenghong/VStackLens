@@ -1,7 +1,10 @@
 {
-  "fixture_type": "sanitized_real_log_event_correlation",
+  "fixture_type": "reconstructed_sanitized_real_sample_metadata",
   "parent_dataset_id": "ds-real-20260925T133451Z",
   "source_log_file": "provided ESXi support bundle: var/run/log/vobd.0.gz",
+  "raw_support_bundle_available": false,
+  "raw_log_messages_included": false,
+  "replay_mode": "test reconstructs normalized input lines from sampled metadata; this is not a raw support-bundle replay",
   "stable_id": "derived:a6a12a91b62911b5cbcb0c7a",
   "window_seconds": 3600,
   "log_samples": [
@@ -113,7 +116,7 @@
         "derived:a6a12a91b62911b5cbcb0c7a"
       ],
       "message": "Physical NIC vmnic4 linkstate is down",
-      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+      "event_source_api": "EventManager.QueryEvents"
     },
     {
       "timestamp": "2026-08-28T10:27:03Z",
@@ -123,7 +126,7 @@
         "derived:a6a12a91b62911b5cbcb0c7a"
       ],
       "message": "Physical NIC vmnic4 linkstate is down",
-      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+      "event_source_api": "EventManager.QueryEvents"
     },
     {
       "timestamp": "2026-08-28T10:27:03Z",
@@ -133,7 +136,7 @@
         "derived:a6a12a91b62911b5cbcb0c7a"
       ],
       "message": "Physical NIC vmnic5 linkstate is down",
-      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+      "event_source_api": "EventManager.QueryEvents"
     },
     {
       "timestamp": "2026-08-28T10:27:03Z",
@@ -143,7 +146,7 @@
         "derived:a6a12a91b62911b5cbcb0c7a"
       ],
       "message": "Physical NIC vmnic5 linkstate is down",
-      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+      "event_source_api": "EventManager.QueryEvents"
     },
     {
       "timestamp": "2026-08-28T10:27:04Z",
@@ -153,7 +156,7 @@
         "derived:a6a12a91b62911b5cbcb0c7a"
       ],
       "message": "Physical NIC vmnic4 linkstate is up",
-      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+      "event_source_api": "EventManager.QueryEvents"
     },
     {
       "timestamp": "2026-08-28T10:27:04Z",
@@ -163,7 +166,7 @@
         "derived:a6a12a91b62911b5cbcb0c7a"
       ],
       "message": "Physical NIC vmnic5 linkstate is up",
-      "dataset_pointer": "events/event.ndjson#NET-DEEP-001/derived:a6a12a91b62911b5cbcb0c7a"
+      "event_source_api": "EventManager.QueryEvents"
     }
   ],
   "expected_links": [

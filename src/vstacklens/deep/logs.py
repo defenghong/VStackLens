@@ -4,7 +4,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from vstacklens.deep.contracts import DatasetRecord, DeepEntity, DeepSource, DeepWindow
+from vstacklens.deep.contracts import DatasetRecord, DeepDataset, DeepEntity, DeepSource, DeepWindow
 
 
 LOG_CATEGORIES = ("vmkernel", "hostd", "vpxa", "vobd", "syslog", "vsan", "ha")
@@ -685,12 +685,16 @@ def correlate_log_records(
                 )
                 pointer_rule_ids = _preferred_event_rule_ids(set(item.get("rule_ids") or []), set(matching_categories))
                 if isinstance(object_pointers, dict):
-                    related_item["dataset_pointer"] = next(
+                    resolved_pointer = next(
                         (object_pointers[rule_id] for rule_id in pointer_rule_ids if object_pointers.get(rule_id)),
                         related_item.get("dataset_pointer"),
                     )
                 else:
-                    related_item["dataset_pointer"] = object_pointers or related_item.get("dataset_pointer")
+                    resolved_pointer = object_pointers or related_item.get("dataset_pointer")
+                if resolved_pointer:
+                    related_item["dataset_pointer"] = resolved_pointer
+                else:
+                    related_item.pop("dataset_pointer", None)
                 evidence_level = (
                     "same_object_time_category_interface_state"
                     if "network" in matching_categories and shared_interfaces and shared_states
@@ -758,3 +762,144 @@ def correlate_log_records(
         record.metadata["related_record_count"] = len(related_dataset_refs)
         record.metadata["related_record_samples"] = related_dataset_refs[:10]
         record.metadata["time_correlation_window_seconds"] = window_seconds
+
+
+def validate_log_event_references(dataset: DeepDataset) -> dict[str, Any]:
+    """Keep only event pointers that resolve to the same saved event key and time."""
+
+    event_records = {
+        record.raw_pointer: record
+        for record in dataset.records
+        if record.kind == "event" and record.raw_pointer
+    }
+    event_sources = sorted({record.source.api for record in dataset.records if record.kind == "event" and record.source.api})
+    default_source = event_sources[0] if len(event_sources) == 1 else "EventManager.QueryEvents"
+    counts = {
+        "sample_count": 0,
+        "verified_pointer_count": 0,
+        "pointerless_count": 0,
+        "removed_unverified_pointer_count": 0,
+        "source_line_reference_count": 0,
+        "verified_source_line_count": 0,
+        "removed_unverifiable_source_line_count": 0,
+    }
+    for record in dataset.records:
+        if record.kind != "log":
+            continue
+        samples = record.metadata.get("related_event_samples")
+        if not isinstance(samples, list):
+            continue
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            counts["sample_count"] += 1
+            sample.setdefault("event_source_api", default_source)
+            pointer = str(sample.get("dataset_pointer") or "")
+            if not pointer:
+                counts["pointerless_count"] += 1
+            else:
+                target = event_records.get(pointer)
+                if target and _exact_event_sample_exists(target, sample, record.entity.stable_id):
+                    counts["verified_pointer_count"] += 1
+                    sample["dataset_pointer_validation"] = "event_key_time_object_verified"
+                else:
+                    sample.pop("dataset_pointer", None)
+                    sample["dataset_pointer_validation"] = "removed_not_event_specific"
+                    counts["removed_unverified_pointer_count"] += 1
+
+            if sample.get("source_line_number") is not None:
+                counts["source_line_reference_count"] += 1
+                if _source_line_number_exists(record, sample):
+                    counts["verified_source_line_count"] += 1
+                    sample["source_line_number_validation"] = "verified_in_saved_log_ranges"
+                else:
+                    sample.pop("source_line_number", None)
+                    sample["source_line_number_validation"] = "removed_not_verifiable_in_saved_log_ranges"
+                    counts["removed_unverifiable_source_line_count"] += 1
+
+    counts["status"] = (
+        "partial"
+        if counts["removed_unverified_pointer_count"] or counts["removed_unverifiable_source_line_count"]
+        else "ok"
+    )
+    counts["note"] = (
+        "已移除不能在目标事件 Dataset 记录中按同一 Event Key、时间和对象核实的指针；"
+        "没有独立事件定位时保留来源 API 与日志侧摘要。"
+    )
+    return counts
+
+
+def _exact_event_sample_exists(event_record: DatasetRecord, log_sample: dict[str, Any], log_object_id: str) -> bool:
+    wanted_key = str(log_sample.get("event_key") or "")
+    wanted_time = _normalise_timestamp(log_sample.get("timestamp"))
+    if not wanted_key or not wanted_time:
+        return False
+    saved_samples = event_record.metadata.get("event_samples")
+    if not isinstance(saved_samples, list):
+        return False
+    for saved in saved_samples:
+        if not isinstance(saved, dict):
+            continue
+        saved_key = str(saved.get("event_key", saved.get("key", "")) or "")
+        saved_time = _normalise_timestamp(
+            saved.get("timestamp")
+            or saved.get("created_time")
+            or saved.get("createdTime")
+            or saved.get("time")
+        )
+        if saved_key != wanted_key or saved_time != wanted_time:
+            continue
+        resolved_ids = {
+            str(item.get("stable_id") or "").casefold()
+            for item in saved.get("resolved_entities", [])
+            if isinstance(item, dict)
+        }
+        resolved_ids.update(str(value).casefold() for value in saved.get("object_ids", []) if value)
+        if (
+            event_record.entity.stable_id.casefold() == log_object_id.casefold()
+            or log_object_id.casefold() in resolved_ids
+        ):
+            return True
+    return False
+
+
+def _source_line_number_exists(record: DatasetRecord, sample: dict[str, Any]) -> bool:
+    try:
+        wanted = int(sample.get("source_line_number"))
+    except (TypeError, ValueError):
+        return False
+    direct = record.metadata.get("source_line_numbers")
+    if isinstance(direct, (list, tuple)) and wanted in {int(value) for value in direct if str(value).isdigit()}:
+        return True
+    try:
+        line_index = int(sample.get("log_line_index"))
+    except (TypeError, ValueError):
+        return False
+    ranges = record.metadata.get("source_line_ranges")
+    if not isinstance(ranges, list):
+        return False
+    for item in ranges:
+        if not isinstance(item, dict):
+            continue
+        try:
+            record_start = int(item["record_line_start"])
+            record_end = int(item["record_line_end"])
+            source_start = int(item["source_line_start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if record_start <= line_index <= record_end:
+            return source_start + line_index - record_start == wanted
+    return False
+
+
+def _normalise_timestamp(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return timestamp.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    except ValueError:
+        return text

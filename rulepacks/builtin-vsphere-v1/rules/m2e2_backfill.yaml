@@ -372,6 +372,7 @@ rules:
       required: false
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: power_state == "poweredOff" and is_template == False and is_system_vm == False
     pass_when: power_state != "poweredOff" or is_template == True or is_system_vm == True
   severity_policy:

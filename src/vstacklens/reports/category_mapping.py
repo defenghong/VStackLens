@@ -11,14 +11,17 @@ from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
+from vstacklens.reports.customer_caliber import DENIED_RULES, INTERNAL_BRIDGE_RULES, object_key, rule_grade
+from vstacklens.reports.rule_provenance import recorded_rule
+
 
 @dataclass(frozen=True, slots=True)
 class FindingCategoryDefinition:
     category_id: str
     title_zh: str
     section: str
-    priority: str
     source_rule_ids: tuple[str, ...]
+    priority: str = ""
     description_zh: str = ""
     impact_scope: str = ""
     potential_impact: str = ""
@@ -28,73 +31,73 @@ class FindingCategoryDefinition:
     report_visible: bool = True
 
 
-def _d(category_id: str, title: str, section: str, priority: str, rules: Iterable[str], **kwargs: Any) -> FindingCategoryDefinition:
-    return FindingCategoryDefinition(category_id, title, section, priority, tuple(rules), **kwargs)
+def _d(category_id: str, title: str, section: str, rules: Iterable[str], **kwargs: Any) -> FindingCategoryDefinition:
+    return FindingCategoryDefinition(category_id, title, section, tuple(rules), **kwargs)
 
 
 # The order follows the report sections and is also used for deterministic
 # output.  Keep this table explicit: it is the reviewable contract between
 # rule packs and customer reports.
 _DEFINITIONS = [
-    _d("VC-CONNECTIVITY", "vCenter 连通性", "vCenter", "P1", ["VSL-VC-001"]),
-    _d("VC-LIFECYCLE", "vCenter 生命周期", "vCenter", "P1", ["VSL-VC-002"]),
-    _d("VC-ALARMS", "vCenter 活动告警", "vCenter", "P1", ["VSL-VC-004"]),
-    _d("VC-CERTIFICATE", "vCenter 证书问题", "vCenter", "P1", ["VSL-VC-005"]),
-    _d("VC-LICENSE", "vCenter License 状态", "vCenter", "P1", ["VSL-VC-006"]),
-    _d("VC-TASK-BACKLOG", "vCenter 任务积压", "vCenter", "P2", ["VSL-VC-015"]),
-    _d("CLUSTER-HA", "集群 HA 配置问题", "Cluster", "P1", ["VSL-CL-001"]),
-    _d("CLUSTER-HA-ADMISSION-CONTROL", "集群 HA 准入控制问题", "Cluster", "P1", ["VSL-CL-002"]),
-    _d("CLUSTER-DRS", "集群 DRS 配置问题", "Cluster", "P1", ["VSL-CL-003"]),
-    _d("CLUSTER-DRS-AUTOMATION", "集群 DRS 自动化配置", "Cluster", "P2", ["VSL-CL-004"]),
-    _d("CLUSTER-CPU", "集群 CPU 使用率问题", "Cluster", "P1", ["VSL-CL-005"]),
-    _d("CLUSTER-ESXI-VERSION", "集群 ESXi 版本一致性", "Cluster", "P1", ["VSL-CL-006"]),
-    _d("CLUSTER-EVC", "集群 EVC 配置", "Cluster", "P3", ["VSL-CL-007"]),
-    _d("CLUSTER-HA-ISOLATION", "集群 HA 隔离响应", "Cluster", "P2", ["VSL-CL-009"]),
-    _d("CLUSTER-CPU-CONSISTENCY", "集群 CPU 一致性", "Cluster", "P3", ["VSL-CL-010"]),
-    _d("CLUSTER-MEMORY-CONSISTENCY", "集群内存一致性", "Cluster", "P3", ["VSL-CL-011"]),
-    _d("CLUSTER-DRS-RULE", "集群 DRS 规则", "Cluster", "P2", ["VSL-CL-012"]),
-    _d("CLUSTER-MAINTENANCE-MODE", "集群维护模式主机", "Cluster", "P1", ["VSL-CL-013"]),
-    _d("CLUSTER-VMOTION-NETWORK", "集群 vMotion 网络", "Cluster", "P1", ["VSL-CL-016"]),
-    _d("HOST-CONNECTION", "ESXi 主机连接状态", "Host", "P1", ["VSL-HOST-001"]),
-    _d("HOST-MANAGEMENT-SERVICE", "ESXi 高权限管理服务开启", "Host", "P1", ["VSL-HOST-002", "VSL-HOST-016"]),
-    _d("HOST-TIME-SYNC", "ESXi 时间同步问题", "Host", "P1", ["VSL-HOST-003"]),
-    _d("HOST-CPU", "ESXi CPU 使用率问题", "Host", "P1", ["VSL-HOST-005"]),
-    _d("HOST-MEMORY", "ESXi 内存使用率问题", "Host", "P1", ["VSL-HOST-006"]),
-    _d("HOST-CERTIFICATE", "ESXi 证书问题", "Host", "P1", ["VSL-HOST-008"]),
-    _d("HOST-PNIC", "ESXi 物理网卡问题", "Host", "P1", ["VSL-HOST-019"]),
-    _d("HOST-STORAGE-PATH", "ESXi 存储路径问题", "Host", "P1", ["VSL-HOST-020"]),
-    _d("HOST-LICENSE", "ESXi License 状态", "Host", "P1", ["VSL-HOST-023"]),
-    _d("HOST-HARDWARE-HEALTH", "ESXi 硬件健康问题", "Host", "P1", ["VSL-HOST-024"]),
-    _d("HOST-RESOURCE-ALLOCATION", "ESXi 资源分配需要关注", "Host", "P2", ["VSL-HOST-026"]),
-    _d("VM-SNAPSHOT", "虚拟机快照问题", "Virtual Machine", "P2", ["VSL-VM-001", "VSL-VM-007", "VSL-VM-022"]),
-    _d("VM-CPU-READY", "虚拟机 CPU Ready 过高", "Virtual Machine", "P1", ["VSL-VM-004"]),
-    _d("VM-MEMORY-PRESSURE", "虚拟机存在内存压力", "Virtual Machine", "P1", ["VSL-VM-005"]),
-    _d("VM-CDROM", "虚拟机 CD/DVD / ISO 挂载", "Virtual Machine", "P2", ["VSL-VM-006"]),
-    _d("VM-NONPERSISTENT-DISK", "虚拟机使用非持久化磁盘", "Virtual Machine", "P3", ["VSL-VM-009"]),
-    _d("VM-RESOURCE-CONFIG", "虚拟机资源配置需要优化", "Virtual Machine", "P3", ["VSL-VM-010", "VSL-VM-011", "VSL-VM-012"]),
-    _d("VM-NUMA-AFFINITY", "虚拟机配置 NUMA 节点亲和", "Virtual Machine", "P3", ["VSL-VM-013"]),
-    _d("VM-NETWORK", "虚拟机网络问题", "Virtual Machine", "P1", ["VSL-VM-016"]),
-    _d("VM-INVENTORY-STATE", "虚拟机不可访问或清单异常", "Virtual Machine", "P1", ["VSL-VM-017"]),
-    _d("VM-LONG-POWERED-OFF", "长期关机虚拟机", "Virtual Machine", "P3", ["VSL-VM-018"]),
-    _d("VM-LOCAL-DATASTORE", "虚拟机运行在本地存储", "Virtual Machine", "P1", ["VSL-VM-023"]),
-    _d("DS-CAPACITY", "Datastore 容量使用率过高", "Datastore", "P2", ["VSL-DS-001"]),
-    _d("DS-ACCESSIBILITY", "Datastore 可访问性问题", "Datastore", "P1", ["VSL-DS-002"]),
-    _d("DS-MOUNT", "Datastore 挂载状态问题", "Datastore", "P3", ["VSL-DS-006"]),
-    _d("DS-MULTIPATH", "Datastore 多路径问题", "Datastore", "P2", ["VSL-DS-007"]),
-    _d("DS-ACTIVE-PATH", "Datastore 活动路径问题", "Datastore", "P3", ["VSL-DS-008"]),
-    _d("DS-THIN-OVERCOMMIT", "Datastore Thin Provisioning 超分", "Datastore", "P2", ["VSL-DS-013"]),
-    _d("NET-PNIC-ERROR", "物理网卡错误", "Network", "P1", ["VSL-NET-003"]),
-    _d("NET-VMK-MTU", "VMkernel MTU 配置问题", "Network", "P1", ["VSL-NET-004"]),
-    _d("SEC-ADMIN-COUNT", "管理员账号数量需要关注", "Security", "P3", ["VSL-SEC-002"]),
-    _d("SEC-PERMISSION-INHERITANCE", "权限继承配置需要关注", "Security", "P3", ["VSL-SEC-008"]),
-    _d("VSAN-CLUSTER-HEALTH", "vSAN 集群健康状态", "vSAN", "P1", ["VSAN-01", "VSL-VSAN-01"]),
-    _d("VSAN-DISK", "vSAN 磁盘与磁盘组", "vSAN", "P1", ["VSAN-02", "VSL-VSAN-02"]),
-    _d("VSAN-OBJECT-HEALTH", "vSAN Object 健康状态", "vSAN", "P1", ["VSAN-03", "VSL-VSAN-03"]),
-    _d("VSAN-OBJECT-VMDK", "vSAN Object / VMDK 状态", "vSAN", "P1", ["VSAN-04", "VSL-VSAN-04"]),
-    _d("VSAN-RESYNC", "vSAN 重同步状态", "vSAN", "P1", ["VSAN-05", "VSL-VSAN-05"]),
-    _d("VSAN-NETWORK", "vSAN 网络状态", "vSAN", "P1", ["VSAN-06", "VSL-VSAN-06"]),
-    _d("VSAN-CAPACITY", "vSAN 容量使用率", "vSAN", "P2", ["VSAN-07", "VSL-VSAN-07"]),
-    _d("VSAN-POLICY", "vSAN Storage Policy 合规性", "vSAN", "P2", ["VSAN-08", "VSL-VSAN-08"]),
+    _d("VC-CONNECTIVITY", "vCenter 连通性", "vCenter", ["VSL-VC-001"]),
+    _d("VC-LIFECYCLE", "vCenter 生命周期", "vCenter", ["VSL-VC-002"]),
+    _d("VC-ALARMS", "vCenter 活动告警", "vCenter", ["VSL-VC-004"]),
+    _d("VC-CERTIFICATE", "vCenter 证书问题", "vCenter", ["VSL-VC-005"]),
+    _d("VC-LICENSE", "vCenter License 状态", "vCenter", ["VSL-VC-006"]),
+    _d("VC-TASK-BACKLOG", "vCenter 任务积压", "vCenter", ["VSL-VC-015"]),
+    _d("CLUSTER-HA", "集群 HA 配置问题", "Cluster", ["VSL-CL-001"]),
+    _d("CLUSTER-HA-ADMISSION-CONTROL", "集群 HA 准入控制问题", "Cluster", ["VSL-CL-002"]),
+    _d("CLUSTER-DRS", "集群 DRS 配置问题", "Cluster", ["VSL-CL-003"]),
+    _d("CLUSTER-DRS-AUTOMATION", "集群 DRS 自动化配置", "Cluster", ["VSL-CL-004"]),
+    _d("CLUSTER-CPU", "集群 CPU 使用率问题", "Cluster", ["VSL-CL-005"]),
+    _d("CLUSTER-ESXI-VERSION", "集群 ESXi 版本一致性", "Cluster", ["VSL-CL-006"]),
+    _d("CLUSTER-EVC", "集群 EVC 配置", "Cluster", ["VSL-CL-007"]),
+    _d("CLUSTER-HA-ISOLATION", "集群 HA 隔离响应", "Cluster", ["VSL-CL-009"]),
+    _d("CLUSTER-CPU-CONSISTENCY", "集群 CPU 一致性", "Cluster", ["VSL-CL-010"]),
+    _d("CLUSTER-MEMORY-CONSISTENCY", "集群内存一致性", "Cluster", ["VSL-CL-011"]),
+    _d("CLUSTER-DRS-RULE", "集群 DRS 规则", "Cluster", ["VSL-CL-012"]),
+    _d("CLUSTER-MAINTENANCE-MODE", "集群维护模式主机", "Cluster", ["VSL-CL-013"]),
+    _d("CLUSTER-VMOTION-NETWORK", "集群 vMotion 网络", "Cluster", ["VSL-CL-016"]),
+    _d("HOST-CONNECTION", "ESXi 主机连接状态", "Host", ["VSL-HOST-001"]),
+    _d("HOST-MANAGEMENT-SERVICE", "ESXi 高权限管理服务开启", "Host", ["VSL-HOST-002", "VSL-HOST-016"]),
+    _d("HOST-TIME-SYNC", "ESXi 时间同步问题", "Host", ["VSL-HOST-003"]),
+    _d("HOST-CPU", "ESXi CPU 使用率问题", "Host", ["VSL-HOST-005"]),
+    _d("HOST-MEMORY", "ESXi 内存使用率问题", "Host", ["VSL-HOST-006"]),
+    _d("HOST-CERTIFICATE", "ESXi 证书问题", "Host", ["VSL-HOST-008"]),
+    _d("HOST-PNIC", "ESXi 物理网卡问题", "Host", ["VSL-HOST-019"]),
+    _d("HOST-STORAGE-PATH", "ESXi 存储路径问题", "Host", ["VSL-HOST-020"]),
+    _d("HOST-LICENSE", "ESXi License 状态", "Host", ["VSL-HOST-023"]),
+    _d("HOST-HARDWARE-HEALTH", "ESXi 硬件健康问题", "Host", ["VSL-HOST-024"]),
+    _d("HOST-RESOURCE-ALLOCATION", "ESXi 资源分配需要关注", "Host", ["VSL-HOST-026"]),
+    _d("VM-SNAPSHOT", "虚拟机存在快照", "Virtual Machine", ["VSL-VM-001", "VSL-VM-007", "VSL-VM-022"]),
+    _d("VM-CPU-READY", "虚拟机 CPU Ready 过高", "Virtual Machine", ["VSL-VM-004"]),
+    _d("VM-MEMORY-PRESSURE", "虚拟机存在内存压力", "Virtual Machine", ["VSL-VM-005"]),
+    _d("VM-CDROM", "虚拟机挂载 ISO 镜像", "Virtual Machine", ["VSL-VM-006"]),
+    _d("VM-NONPERSISTENT-DISK", "虚拟机使用非持久化磁盘", "Virtual Machine", ["VSL-VM-009"]),
+    _d("VM-RESOURCE-CONFIG", "虚拟机资源配置需要优化", "Virtual Machine", ["VSL-VM-010", "VSL-VM-011", "VSL-VM-012"]),
+    _d("VM-NUMA-AFFINITY", "虚拟机配置 NUMA 节点亲和", "Virtual Machine", ["VSL-VM-013"]),
+    _d("VM-NETWORK", "虚拟机网络问题", "Virtual Machine", ["VSL-VM-016"]),
+    _d("VM-INVENTORY-STATE", "虚拟机不可访问或清单异常", "Virtual Machine", ["VSL-VM-017"]),
+    _d("VM-LONG-POWERED-OFF", "存在关机的虚拟机", "Virtual Machine", ["VSL-VM-018"]),
+    _d("VM-LOCAL-DATASTORE", "虚拟机运行在本地存储", "Virtual Machine", ["VSL-VM-023"]),
+    _d("DS-CAPACITY", "Datastore 容量使用率过高", "Datastore", ["VSL-DS-001"]),
+    _d("DS-ACCESSIBILITY", "Datastore 可访问性问题", "Datastore", ["VSL-DS-002"]),
+    _d("DS-MOUNT", "Datastore 挂载状态问题", "Datastore", ["VSL-DS-006"]),
+    _d("DS-MULTIPATH", "Datastore 多路径问题", "Datastore", ["VSL-DS-007"]),
+    _d("DS-ACTIVE-PATH", "Datastore 活动路径问题", "Datastore", ["VSL-DS-008"]),
+    _d("DS-THIN-OVERCOMMIT", "Datastore Thin Provisioning 超分", "Datastore", ["VSL-DS-013"]),
+    _d("NET-PNIC-ERROR", "物理网卡错误", "Network", ["VSL-NET-003"]),
+    _d("NET-VMK-MTU", "VMkernel MTU 配置问题", "Network", ["VSL-NET-004"]),
+    _d("SEC-ADMIN-COUNT", "管理员账号数量需要关注", "Security", ["VSL-SEC-002"]),
+    _d("SEC-PERMISSION-INHERITANCE", "权限继承配置需要关注", "Security", ["VSL-SEC-008"]),
+    _d("VSAN-CLUSTER-HEALTH", "vSAN 集群健康状态", "vSAN", ["VSAN-01", "VSL-VSAN-01"]),
+    _d("VSAN-DISK", "vSAN 磁盘与磁盘组", "vSAN", ["VSAN-02", "VSL-VSAN-02"]),
+    _d("VSAN-OBJECT-HEALTH", "vSAN Object 健康状态", "vSAN", ["VSAN-03", "VSL-VSAN-03"]),
+    _d("VSAN-OBJECT-VMDK", "vSAN Object / VMDK 状态", "vSAN", ["VSAN-04", "VSL-VSAN-04"]),
+    _d("VSAN-RESYNC", "vSAN 重同步状态", "vSAN", ["VSAN-05", "VSL-VSAN-05"]),
+    _d("VSAN-NETWORK", "vSAN 网络状态", "vSAN", ["VSAN-06", "VSL-VSAN-06"]),
+    _d("VSAN-CAPACITY", "vSAN 容量使用率", "vSAN", ["VSAN-07", "VSL-VSAN-07"]),
+    _d("VSAN-POLICY", "vSAN Storage Policy 合规性", "vSAN", ["VSAN-08", "VSL-VSAN-08"]),
 ]
 
 CATEGORY_DEFINITIONS: dict[str, FindingCategoryDefinition] = {item.category_id: item for item in _DEFINITIONS}
@@ -102,10 +105,8 @@ RULE_TO_CATEGORY: dict[str, str] = {
     rule_id: item.category_id for item in _DEFINITIONS for rule_id in item.source_rule_ids
 }
 
-HIDDEN_STANDARD_RULES = frozenset({
-    "VSL-HOST-004", "VSL-HOST-013", "VSL-HOST-014", "VSL-HOST-015",
-    "VSL-VM-002", "VSL-VM-003", "VSL-VM-014", "VSL-VM-015", "VSL-DS-018",
-})
+HIDDEN_STANDARD_RULES = DENIED_RULES
+
 PENDING_MAPPING_RULES = frozenset({"VSL-VM-021"})
 
 
@@ -119,6 +120,7 @@ class CategoryMappingResult:
     affected_object_summary: dict[str, int] = field(default_factory=dict)
     affected_object_occurrence_summary: dict[str, int] = field(default_factory=dict)
     risk_category_summary: dict[str, int] = field(default_factory=dict)
+    internal_bridge_findings: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -130,6 +132,7 @@ class CategoryMappingResult:
             "affected_object_summary": self.affected_object_summary,
             "affected_object_occurrence_summary": self.affected_object_occurrence_summary,
             "risk_category_summary": self.risk_category_summary,
+            "internal_bridge_findings": self.internal_bridge_findings,
         }
 
 
@@ -158,12 +161,7 @@ def _lookup(item: dict[str, Any], *names: str) -> Any:
 
 
 def _stable_object_key(item: dict[str, Any]) -> str:
-    evidence = _evidence(item)
-    for key in ("instanceUuid", "instance_uuid", "moid", "mo_ref", "object_key", "objectKey"):
-        value = _lookup(item, key)
-        if value not in (None, ""):
-            return str(value)
-    return str(item.get("object_key") or item.get("object_name") or "unknown-object")
+    return object_key(item)[1]
 
 
 def _is_cl007_applicable(item: dict[str, Any]) -> bool:
@@ -225,42 +223,37 @@ def map_findings_to_categories(findings: Iterable[dict[str, Any]], *, vsan_appli
     mapped: list[dict[str, Any]] = []
     hidden: list[dict[str, Any]] = []
     unmapped: set[str] = set()
+    bridges: list[dict[str, Any]] = []
     for original in findings:
         item = dict(original)
         rule_id = str(item.get("rule_id") or "")
+        if rule_id in INTERNAL_BRIDGE_RULES:
+            item.update(report_status="INTERNAL_BRIDGE")
+            bridges.append(item)
+            continue
+        declared = recorded_rule(item)
+        item.setdefault("object_type", declared.get("object_type", ""))
+        level = rule_grade(item)
         if rule_id in HIDDEN_STANDARD_RULES:
-            item["report_status"] = "SUPPRESSED"
+            item.update(report_status="SUPPRESSED", non_report_reason="已定不报")
+            hidden.append(item)
+            continue
+        if level == "P4":
+            item.update(report_status="P4_ONLY", non_report_reason="P4", risk_level=level)
             hidden.append(item)
             continue
         if rule_id in PENDING_MAPPING_RULES:
-            item["report_mapping_status"] = "REPORT_MAPPING_PENDING"
-            item["report_status"] = "NEEDS_REVIEW"
-            hidden.append(item)
-            continue
-        # DS-020 is retained only as an internal compatibility bridge.  It
-        # must never create a second customer category beside VSAN-01..08.
-        if rule_id == "VSL-DS-020":
-            item["report_status"] = "INTERNAL_ONLY"
+            item.update(report_mapping_status="REPORT_MAPPING_PENDING", report_status="NEEDS_REVIEW", non_report_reason="待映射")
             hidden.append(item)
             continue
         category_id = RULE_TO_CATEGORY.get(rule_id)
-        if not category_id:
+        if not category_id or level not in {"P1", "P2", "P3"}:
             unmapped.add(rule_id)
-            hidden.append(item)
-            continue
-        if rule_id == "VSL-DS-020" and vsan_applicable:
-            hidden.append(item)
-            continue
-        if rule_id == "VSL-CL-007" and not _is_cl007_applicable(item):
-            item["report_status"] = "DESIGN_EXCEPTION"
-            hidden.append(item)
-            continue
-        if rule_id in {"VSAN-05", "VSL-VSAN-05"} and not _resync_actionable(item):
-            item["report_status"] = "DESIGN_EXCEPTION"
+            item.update(report_status="NEEDS_REVIEW", non_report_reason="待映射")
             hidden.append(item)
             continue
         definition = CATEGORY_DEFINITIONS[category_id]
-        priority = _cl009_priority(item, vsan_applicable) if category_id == "CLUSTER-HA-ISOLATION" else definition.priority
+        priority = level
         enriched = dict(item)
         enriched.update({"category_id": category_id, "category_title": definition.title_zh, "risk_level": priority, "report_visible": True, "report_status": "REPORTED"})
         enriched["category_subreason"] = _subreason(item)
@@ -286,7 +279,10 @@ def map_findings_to_categories(findings: Iterable[dict[str, Any]], *, vsan_appli
         object_key = _stable_object_key(item)
         if object_key not in group["_object_keys"]:
             group["_object_keys"].add(object_key)
-            group["affected_objects"].append({"object_key": object_key, "object_name": item.get("object_name", ""), "object_type": item.get("object_type", ""), "object_path": item.get("object_path", "")})
+            group["affected_objects"].append({"object_key": object_key, "object_name": item.get("object_name", ""), "object_type": item.get("object_type", ""), "object_path": item.get("object_path", ""), "risk_level": priority})
+        for obj in group["affected_objects"]:
+            if obj["object_key"] == object_key and {"P1": 0, "P2": 1, "P3": 2}[priority] < {"P1": 0, "P2": 1, "P3": 2}[obj["risk_level"]]:
+                obj["risk_level"] = priority
         reason = enriched["category_subreason"]
         if reason and reason not in group["subreasons"]:
             group["subreasons"].append(reason)
@@ -300,22 +296,31 @@ def map_findings_to_categories(findings: Iterable[dict[str, Any]], *, vsan_appli
     for group in groups.values():
         group.pop("_object_keys", None)
         priorities = group.pop("_priorities", set())
-        # Category priority is fixed by metadata, except the documented
-        # CL-009 cluster-context case.
-        group["priority"] = "P1" if "P1" in priorities else group["priority"]
+        # Each category counts once at its highest actual YAML result level.
+        group["priority"] = min(priorities, key={"P1": 0, "P2": 1, "P3": 2}.__getitem__)
         group["risk_level"] = group["priority"]
         group["affected_object_count"] = len(group["affected_objects"])
         group["object_count"] = group["affected_object_count"]
+        actual_rules = sorted({item["rule_id"] for item in group["evidence_items"]})
+        group["matched_rule_ids"] = actual_rules
         group["title"] = group["title_zh"]
+        if len(actual_rules) == 1:
+            specific = next(item for item in mapped if item["category_id"] == group["category_id"])
+            fields = recorded_rule(specific).get("report_fields") or {}
+            group["title"] = fields.get("finding_title_zh") or fields.get("title_zh") or specific.get("title") or group["title_zh"]
+            if actual_rules[0] == "VSL-VM-011":
+                # Reuse Word's existing customer wording across every consumer.
+                group["title"] = group["title"].replace("资源 Limit", "资源限制").replace("Limit", "资源限制")
         group["module_name"] = group["section"]
         categories.append(group)
         if group["priority"] in affected_occurrences:
             affected_occurrences[group["priority"]] += int(group.get("affected_object_occurrence_count", 0) or 0)
-            global_objects[group["priority"]].update(str(obj.get("object_key") or obj.get("object_name") or "") for obj in group["affected_objects"])
+            for obj in group["affected_objects"]:
+                global_objects[obj["risk_level"]].add((obj.get("object_type", ""), str(obj.get("object_key") or obj.get("object_name") or "")))
     categories.sort(key=lambda g: ({"P1": 0, "P2": 1, "P3": 2}.get(g["priority"], 9), g["category_id"]))
     summary = {"P1": sum(1 for g in categories if g["priority"] == "P1"), "P2": sum(1 for g in categories if g["priority"] == "P2"), "P3": sum(1 for g in categories if g["priority"] == "P3"), "P4": 0}
     affected = {level: len(keys) for level, keys in global_objects.items()}
-    return CategoryMappingResult(categories, mapped, hidden, sorted(unmapped - {""}), sorted(PENDING_MAPPING_RULES), affected, affected_occurrences, summary)
+    return CategoryMappingResult(categories, mapped, hidden, sorted(unmapped - {""}), sorted(PENDING_MAPPING_RULES), affected, affected_occurrences, summary, bridges)
 
 
 class FindingCategoryMapper:

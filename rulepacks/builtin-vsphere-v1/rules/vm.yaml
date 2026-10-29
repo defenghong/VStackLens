@@ -4,7 +4,7 @@ rules:
   rule_name: VM old snapshot
   category: vm
   object_type: VirtualMachine
-  risk_level: P1
+  risk_level: P2
   health_impact: attention
   confidence_level: high
   enabled: true
@@ -24,11 +24,12 @@ rules:
       required: false
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: snapshot_age_days_max >= 7
     pass_when: snapshot_age_days_max < 7
   severity_policy:
     type: fixed
-    default_level: P1
+    default_level: P2
   evidence_schema:
     current_value_path: snapshot_age_days_max
     expected_value: < 7
@@ -106,6 +107,7 @@ rules:
       required: false
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: power_state == 'poweredOn' and tools_running == False
     pass_when: power_state != 'poweredOn' or tools_running == True
   severity_policy:
@@ -187,6 +189,7 @@ rules:
       required: false
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: tools_outdated == True
     pass_when: tools_outdated == False
   severity_policy:
@@ -272,6 +275,7 @@ rules:
       minimum_samples: 3
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: cpu_ready_percent >= 5
     pass_when: cpu_ready_percent < 5
   severity_policy:
@@ -361,6 +365,7 @@ rules:
       minimum_samples: 3
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: swap_or_balloon_mb >= 512
     pass_when: swap_or_balloon_mb < 512
   severity_policy:
@@ -442,6 +447,7 @@ rules:
       required: false
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: iso_mounted == True
     pass_when: iso_mounted == False
   severity_policy:

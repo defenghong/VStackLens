@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from vstacklens.reports.license_evidence import license_summary
+
 import json
+import hashlib
 import math
+import re
 import os
 import shutil
 import subprocess
@@ -11,8 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from vstacklens.reports.report_model import ReportData
+from vstacklens.reports.customer_format import (
+    CAPACITY_NOTE, capacity_bytes_text, capacity_text, capacity_unit, decimal_text, local_time_text, percent_text,
+)
 from vstacklens.reports.narrative import build_pdf_narratives
-from vstacklens.reports.presentation import append_report_sentence, count_excluded_powered_off_vms, powered_off_exclusion_note
+from vstacklens.reports.presentation import append_report_sentence, count_excluded_powered_off_vms, powered_off_exclusion_note, customer_judgment_metadata
 from vstacklens.resources import package_resource_path, project_resource_path
 
 
@@ -25,9 +32,33 @@ class PdfReportEngine:
         output_path: Path,
         *,
         report_context: dict[str, Any] | None = None,
+        secrets: tuple[str, ...] = (),
     ) -> Path:
+        if not report.product_modules:
+            from vstacklens.reports.document_pdf import render_document_pdf
+            return render_document_pdf(self, report, output_path, context=report_context, secrets=secrets)
+        from vstacklens.products.reporting import ensure_report_has_valid_data
+        from vstacklens.reports.product_evidence import staged_product_file
+        ensure_report_has_valid_data(report)
         output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            raise FileExistsError("拒绝覆盖已有 PDF 报告，请选择新的输出文件。")
+        self._compilation_parent(output_path, self._typst_binary())
+        with staged_product_file(report, output_path, secrets=secrets, overwrite=False) as stage:
+            self._render(report, stage, report_context=report_context, secrets=secrets)
+        return output_path
+
+    def _render(
+        self,
+        report: ReportData,
+        output_path: Path,
+        *,
+        report_context: dict[str, Any] | None = None,
+        secrets: tuple[str, ...] = (),
+    ) -> Path:
+        from vstacklens.products.reporting import ensure_report_has_valid_data
+        ensure_report_has_valid_data(report)
+        output_path = Path(output_path)
         if output_path.exists():
             raise FileExistsError(f"拒绝覆盖已有 PDF 报告：{output_path}")
         template = package_resource_path("reports", "templates", "inspection-report.typ")
@@ -35,8 +66,13 @@ class PdfReportEngine:
             raise RuntimeError(f"PDF 模板不存在：{template}")
         typst = self._typst_binary()
         payload = self._build_payload(report, report_context or {})
+        work_parent = self._compilation_parent(output_path, typst)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with tempfile.TemporaryDirectory(prefix=".vstacklens-pdf-", dir=output_path.parent) as temporary_dir:
+        # CreateProcess cwd and native compiler file APIs have different path
+        # limits from Python file operations. Never compile below a deep export
+        # destination; the caller's final report path is preserved unchanged.
+        with tempfile.TemporaryDirectory(prefix="vsl-pdf-", dir=work_parent) as temporary_dir:
             root = Path(temporary_dir)
             staged_template = root / "inspection-report.typ"
             staged_pdf = root / "inspection-report.pdf"
@@ -45,6 +81,10 @@ class PdfReportEngine:
                 self._scope_level_donut_svg(payload["scope"]),
                 encoding="utf-8",
             )
+            for index, assessment in enumerate(payload.get("legacy_reports") or []):
+                chart_name = f"scope-level-donut-{index}.svg"
+                (root / chart_name).write_text(self._scope_level_donut_svg(assessment["scope"]), encoding="utf-8")
+                assessment["scope_donut_file"] = chart_name
             (root / "payload.json").write_text(
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
@@ -75,8 +115,45 @@ class PdfReportEngine:
                 raise RuntimeError(f"PDF 生成失败：{diagnostic[-3000:]}")
             if output_path.exists():
                 raise FileExistsError(f"PDF 目标在生成期间已出现，未覆盖：{output_path}")
-            staged_pdf.rename(output_path)
+            self._publish_pdf(staged_pdf, output_path, secrets=secrets)
         return output_path
+
+    @staticmethod
+    def _compilation_parent(output_path: Path, typst: Path) -> Path:
+        work_parent = Path(tempfile.gettempdir()).absolute()
+        if os.name == "nt":
+            units = lambda value: len(str(value).encode("utf-16-le")) // 2
+            absolute_output = output_path.absolute()
+            if any(units(part) > 255 for part in absolute_output.parts):
+                raise ValueError("PDF 输出目录或文件名单段过长，尚未开始编译；请改用较短的目录和文件名。")
+            # Reserve room for the random work directory and the longest fixed
+            # staging filename. This preflight rejects an unsafe TEMP before a
+            # native process starts, rather than failing late with WinError 267.
+            longest_staged = "scope-level-donut-999999.svg"
+            if units(work_parent) + 1 + len("vsl-pdf-") + 16 + 1 + len(longest_staged) >= 260:
+                raise ValueError("PDF 临时目录过长，尚未开始编译；请将 TEMP／TMP 指向较短的本机目录后重试。")
+            if units(typst.absolute()) >= 260:
+                raise ValueError("PDF 编译器路径过长，尚未开始编译；请使用较短目录中的已登记离线运行时。")
+        return work_parent
+
+    @staticmethod
+    def _publish_pdf(staged_pdf: Path, output_path: Path, *, secrets=()) -> None:
+        from vstacklens.application.artifact_safety import ensure_artifacts_safe
+        # The compiler scratch directory may be on another volume. Copy into a
+        # private destination-volume stage, then scan the exact bytes that will
+        # publish. A native rename on Windows refuses an existing destination.
+        with tempfile.TemporaryDirectory(prefix=".vsl-pdf-publish-", dir=output_path.parent) as temporary:
+            candidate = Path(temporary) / "report.pdf"
+            shutil.copyfile(staged_pdf, candidate)
+            ensure_artifacts_safe([candidate], secrets=secrets)
+            if output_path.exists():
+                raise FileExistsError(f"PDF 目标在生成期间已出现，未覆盖：{output_path}")
+            if os.name == "nt":
+                candidate.rename(output_path)
+            else:
+                # POSIX rename replaces a competing file; link publishes
+                # atomically with no overwrite and the stage is then removed.
+                os.link(candidate, output_path)
 
     def _scope_level_donut_svg(self, scope: dict[str, Any]) -> str:
         size = 220
@@ -97,7 +174,7 @@ class PdfReportEngine:
                 f'<circle cx="{center}" cy="{center}" r="{radius}" fill="none" '
                 f'stroke="{empty_color}" stroke-width="{stroke_width}"/>'
             )
-            center_label = ("全部", "通过") if all_passed else ("无检查", "结果")
+            center_label = ("全部", "通过") if all_passed else (("无未通过", "仍有限制") if scope.get("total_checks") else ("无检查", "结果"))
             center_text = (
                 f'<text x="110" y="103" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" '
                 f'font-size="19" font-weight="700" fill="{empty_color}">{center_label[0]}</text>'
@@ -112,20 +189,23 @@ class PdfReportEngine:
                 count = int(row.get("count") or 0)
                 if count <= 0 or level not in colors:
                     continue
-                segment = circumference * count / total
-                circles.append(
-                    f'<circle cx="{center}" cy="{center}" r="{radius}" fill="none" '
-                    f'stroke="{colors[level]}" stroke-width="{stroke_width}" '
-                    f'stroke-dasharray="{segment:.3f} {circumference - segment:.3f}" '
-                    f'stroke-dashoffset="{-offset:.3f}" '
-                    f'transform="rotate(-90 {center} {center})"/>'
-                )
-                offset += segment
+                # The registered Typst SVG->PDF path drops dashed-circle
+                # clipping. Explicit arc geometry retains every nonzero share.
+                if count == total:
+                    circles.append(f'<circle cx="{center}" cy="{center}" r="{radius}" fill="none" stroke="{colors[level]}" stroke-width="{stroke_width}"/>')
+                else:
+                    start = -math.pi / 2 + offset
+                    angle = 2 * math.pi * count / total
+                    end = start + angle
+                    x1, y1 = center + radius * math.cos(start), center + radius * math.sin(start)
+                    x2, y2 = center + radius * math.cos(end), center + radius * math.sin(end)
+                    circles.append(f'<path d="M {x1:.6f} {y1:.6f} A {radius} {radius} 0 {int(count * 2 > total)} 1 {x2:.6f} {y2:.6f}" fill="none" stroke="{colors[level]}" stroke-width="{stroke_width}"/>')
+                offset += 2 * math.pi * count / total
             center_text = (
                 f'<text x="110" y="105" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" '
                 f'font-size="31" font-weight="700" fill="#163B63">{total}</text>'
                 '<text x="110" y="130" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" '
-                'font-size="15" fill="#607387">条</text>'
+                'font-size="19" fill="#607387">条</text>'
             )
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
@@ -133,6 +213,7 @@ class PdfReportEngine:
         )
 
     def _typst_binary(self) -> Path:
+        manifest = json.loads(package_resource_path("tools", "typst-runtime.json").read_text(encoding="utf-8"))
         configured = os.environ.get("VSTACKLENS_TYPST_BIN", "").strip()
         candidates = [
             Path(configured) if configured else None,
@@ -142,17 +223,39 @@ class PdfReportEngine:
         ]
         for candidate in candidates:
             if candidate is not None and candidate.is_file():
+                if hashlib.sha256(candidate.read_bytes()).hexdigest() != manifest["files"]["typst.exe"]:
+                    raise RuntimeError("Typst 编译器与已登记版本不符；请使用 packaging/stage_typst_runtime.ps1 校验并准备登记的离线运行时。")
                 return candidate
-        on_path = shutil.which("typst") or shutil.which("typst.exe")
-        if on_path:
-            return Path(on_path)
-        raise RuntimeError("未找到 Typst 编译器；源码运行请配置 VSTACKLENS_TYPST_BIN，安装包需内置 typst.exe。")
+        raise RuntimeError("未找到登记的 Typst 编译器；请使用 packaging/stage_typst_runtime.ps1 准备离线运行时。")
 
-    def _build_payload(self, report: ReportData, report_context: dict[str, Any]) -> dict[str, Any]:
+    def _build_payload(self, report: ReportData, report_context: dict[str, Any], *, _allow_connection_diagnostic: bool = False) -> dict[str, Any]:
+        from vstacklens.reports.customer_view import customer_labels
+        from vstacklens.products.reporting import legacy_assessment_reports, has_legacy_sections
+        assessments = legacy_assessment_reports(report)
+        if len(assessments) > 1:
+            view = self._pdf_product_view(report)
+            legacy_payloads = []
+            for metadata, original in assessments:
+                payload = self._build_payload(original, {})
+                payload["vcenter_target_name"] = metadata["target_name"]
+                payload["vcenter_target_id"] = metadata["target_id"]
+                legacy_payloads.append(payload)
+            return {"wording": customer_labels(), "has_vcenter": True, "legacy_reports": legacy_payloads, "product_report": view,
+                    "customer_name": view["customer"], "report_date": view["generated_at"][:10],
+                    "capture_date": view["generated_at"][:10], "scope": {}}
+        if report.product_modules and not has_legacy_sections(report):
+            view = self._pdf_product_view(report)
+            return {"wording": customer_labels(), "has_vcenter": False, "product_report": view, "customer_name": view["customer"],
+                    "report_date": view["generated_at"][:10], "capture_date": view["generated_at"][:10],
+                    "scope": {}}
+        from vstacklens.reports.customer_view import get_customer_problem_view, customer_display_facts
+        shared_problems = get_customer_problem_view(report, report_context)
+        display_facts = customer_display_facts(report)
+        caliber = shared_problems.caliber
         inventory = report.asset_inventory or {}
         details = inventory.get("details") or {}
         vcenter_row = self._first_record(details, "vCenter")
-        if self._properties(vcenter_row).get("connected") is False:
+        if self._properties(vcenter_row).get("connected") is False and not _allow_connection_diagnostic:
             raise RuntimeError("vCenter 连接未成功，不生成基于空数据的客户 PDF。")
         clusters_raw = self._records(details, "ClusterComputeResource")
         hosts_raw = self._records(details, "HostSystem")
@@ -160,7 +263,8 @@ class PdfReportEngine:
         powered_off_note = powered_off_exclusion_note(count_excluded_powered_off_vms(vms_raw))
         hosts_by_name = {str(item.get("object_name") or ""): self._properties(item) for item in hosts_raw}
         vms_by_name = {str(item.get("object_name") or ""): self._properties(item) for item in vms_raw}
-        vsan = report.vsan_summary or report_context.get("vsan_summary") or {}
+        from vstacklens.reports.customer_view import customer_vsan_summary
+        vsan = customer_vsan_summary(report)
         records, vcenter_record = self._report_asset_views(details)
         clusters = records.get("cluster", [])
         host_records = records.get("host", [])
@@ -246,12 +350,12 @@ class PdfReportEngine:
                 top_cpu.append({"name": name, "host": vm_entry["host"], "value": cpu, "display": f"{cpu / 1000:,.2f} GHz"})
             if state == "powered_on" and not props.get("is_system_vm") and memory_mb is not None:
                 memory_gb = memory_mb / 1024
-                top_memory.append({"name": name, "host": vm_entry["host"], "value": memory_mb, "display": f"{memory_gb:,.1f} GB"})
+                top_memory.append({"name": name, "host": vm_entry["host"], "value": memory_mb, "display": capacity_text(memory_gb)})
             disk_gb = self._number(vm.get("diskGb"))
             if has_host:
                 accumulate_host_usage("capacity", host_key, disk_gb)
             if disk_gb is not None:
-                top_capacity.append({"name": name, "host": vm_entry["host"], "value": disk_gb, "display": f"{disk_gb:,.1f} GB"})
+                top_capacity.append({"name": name, "host": vm_entry["host"], "value": disk_gb, "display": capacity_text(disk_gb)})
             vcpu_count = self._number(props.get("vcpu_count"))
             if has_host:
                 accumulate_host_usage("vcpu", host_key, vcpu_count)
@@ -300,7 +404,12 @@ class PdfReportEngine:
                     and host_usage.get("available", 0) == host_usage.get("expected", 0)
                 )
                 denominator = host_usage.get("total") if complete or resource_key == "capacity" else None
+                # Keep the existing internal scope metadata stable; customer
+                # wording is supplied by the common presentation facts.
                 item["host_share_scope"] = share_scope
+                item["display_share_scope"] = display_facts["top_labels"][resource_key]
+                item["host_share_text"] = percent_text(item["value"] * 100 / denominator
+                                                       if denominator is not None and denominator > 0 else None)
                 item["host_share_pct"] = (
                     round(item["value"] * 100 / denominator, 1)
                     if denominator is not None and denominator > 0
@@ -378,6 +487,8 @@ class PdfReportEngine:
                 "snapshots": sum(bool(item["has_snapshot"]) for item in items),
             })
 
+        datastore_capacity_unit = capacity_unit([item.get(key) for item in datastore_records
+                                                 for key in ("usedGb", "freeGb", "totalGb")])
         datastores = []
         for item in datastore_records:
             usage = self._number(item.get("usagePct"))
@@ -387,15 +498,14 @@ class PdfReportEngine:
                 "clusters": list(item.get("clusters") or []),
                 "usage": usage,
                 "usage_text": self._percent_text(usage),
-                "used_text": self._capacity_text(item.get("usedGb")),
-                "free_text": self._capacity_text(item.get("freeGb")),
-                "total_text": self._capacity_text(item.get("totalGb")),
+                "used_text": capacity_text(item.get("usedGb"), unit=datastore_capacity_unit),
+                "free_text": capacity_text(item.get("freeGb"), unit=datastore_capacity_unit),
+                "total_text": capacity_text(item.get("totalGb"), unit=datastore_capacity_unit),
             })
         datastores.sort(key=lambda item: (item["usage"] is None, -(item["usage"] or 0), item["name"].casefold()))
         usage_known_stores = [
             item for item in datastores
             if item.get("usage") is not None
-            and all(bool(item.get(key)) for key in ("used_text", "free_text", "total_text"))
         ]
         top_ten_stores = usage_known_stores[:10]
         selected_store_names = {
@@ -434,38 +544,13 @@ class PdfReportEngine:
         resync_bytes = self._number(vsan.get("resync_bytes"))
         no_resync = resync_objects == 0 and resync_bytes == 0
         has_vsan = str(vsan.get("status") or "") != "not_applicable" and bool(vsan.get("clusters") or vsan.get("disk_details") or vsan.get("capacity", {}).get("total_gb"))
-        disk_rows = []
-        healthy_disk_counts: dict[str, int] = {}
-        for item in vdisk_details:
-            raw_health = str(item.get("health") or "").strip()
-            health_key = raw_health.casefold()
-            if health_key not in healthy_tokens | unhealthy_tokens:
-                continue
-            host_name = str(item.get("host") or "").strip()
-            if not host_name:
-                continue
-            if health_key in healthy_tokens:
-                healthy_disk_counts[host_name] = healthy_disk_counts.get(host_name, 0) + 1
-                continue
-            disk_rows.append({
-                "host": host_name,
-                "group": str(item.get("disk_group") or ""),
-                "role": str(item.get("role") or ""),
-                "device": str(item.get("device") or ""),
-                "health": self._disk_health_label(raw_health),
-                "disk_count": 1,
-                "normal_summary": False,
-            })
-        disk_rows.extend({
-            "host": host_name,
-            "group": "",
-            "role": f"{count} 块物理盘",
-            "device": "",
-            "health": "全部正常",
-            "disk_count": count,
-            "normal_summary": True,
-        } for host_name, count in healthy_disk_counts.items())
-        disk_rows.sort(key=lambda item: (item["host"].casefold(), item["normal_summary"], item["group"].casefold(), item["role"].casefold(), item["device"].casefold()))
+        disk_rows = [{
+            "host": str(item.get("host") or ""), "group": str(item.get("disk_group") or ""),
+            "role": str(item.get("role") or ""), "device": str(item.get("device") or ""),
+            "health": self._disk_health_label(str(item.get("health") or "")),
+            "disk_count": 1, "normal_summary": False,
+        } for item in vdisk_details]
+        disk_rows.sort(key=lambda item: (item["host"].casefold(),item["group"].casefold(),item["role"].casefold(),item["device"].casefold()))
         cluster_views = []
         cluster_details = []
         vm_summary_by_cluster = {str(item.get("cluster") or ""): item for item in cluster_vm_summary}
@@ -475,6 +560,12 @@ class PdfReportEngine:
         for cluster in clusters:
             name = str(cluster.get("name") or "未命名集群")
             props = cluster_props.get(name, {})
+            cluster_matches = [item for item in display_facts["clusters"]
+                               if str(item.get("object_key") or "") == str(cluster.get("object_key") or "")
+                               and item.get("object_key")]
+            if not cluster_matches:
+                cluster_matches = [item for item in display_facts["clusters"] if item.get("name") == name]
+            cluster_display = cluster_matches[0] if len(cluster_matches) == 1 else {}
             vm_summary = vm_summary_by_cluster.get(name, {})
             cluster_views.append({
                 "name": name,
@@ -501,13 +592,13 @@ class PdfReportEngine:
                 "powered_off": int(vm_summary.get("powered_off", 0)),
                 "suspended": int(vm_summary.get("suspended", 0)),
                 "ha_enabled": props.get("ha_enabled"),
-                "admission_control": self._bool_label(props.get("admission_control_enabled")),
+                "admission_control": cluster_display.get("admission_control", ""),
                 "heartbeat_count": heartbeat_count,
                 "heartbeat_names": heartbeat_names,
-                "heartbeat_summary": heartbeat_summary,
+                "heartbeat_summary": cluster_display.get("heartbeat_summary", ""),
                 "isolation_response": self._safe_customer_text(props.get("ha_isolation_response")),
                 "drs_enabled": props.get("drs_enabled"),
-                "drs_behavior": self._drs_behavior_label(props.get("drs_behavior")),
+                "drs_behavior": cluster_display.get("drs_behavior", ""),
                 "drs_disabled_rule_count": self._number(props.get("drs_disabled_rule_count")),
                 "drs_disabled_rules": self._safe_list_text(props.get("drs_disabled_rules")),
                 "evc_enabled": self._bool_label(props.get("evc_enabled")),
@@ -586,18 +677,16 @@ class PdfReportEngine:
                 known_host_certs.append(entry)
         certificate_hosts.sort(key=lambda item: (item["cluster"].casefold(), item["host"].casefold()))
         vcenter_count = int(bool(vcenter_days is not None or vcenter_direct_expiry or vcenter_cert_evidence))
-        licenses = sorted({
-            f"{self._text(self._properties(item).get('host_license_name'))} / {self._text(self._properties(item).get('host_license_expiration_date'))}"
+        licenses = [
+            f"{self._text(item.get('object_name'))} [{self._text(item.get('object_key'))}]："
+            + license_summary(self._properties(item), True, str(item.get("object_key") or ""))
             for item in hosts_raw
-            if self._properties(item).get("host_license_name")
-        })
-        vcenter_license_evidence = next(
-            (item for item in certificate_evidence if item.get("rule_id") == "VSL-VC-006"),
-            {},
-        )
-        vcenter_license_text = str(vcenter_license_evidence.get("current_value_zh") or "").strip()
-        if vcenter_license_text:
-            licenses = sorted(set(licenses) | {f"vCenter：{vcenter_license_text}"})
+        ]
+        for item in self._records(details, "vCenter"):
+            licenses.append(
+                f"vCenter {self._text(item.get('object_name'))} [{self._text(item.get('object_key'))}]："
+                + license_summary(self._properties(item), False, str(item.get("object_key") or ""))
+            )
 
         host_details = []
         for host in hosts:
@@ -678,132 +767,43 @@ class PdfReportEngine:
                 security_parts.append("默认入站防火墙规则 " + ("已阻止" if firewall_state == "是" else "未阻止"))
             if host.get("lockdown"):
                 security_parts.append("锁定模式 " + host["lockdown"])
-            portgroup_count = self._number(props.get("portgroup_security_issue_count"))
-            if portgroup_count is not None:
-                security_parts.append(f"端口组策略异常 {int(portgroup_count)} 项")
             host["security_summary"] = "；".join(security_parts)
 
-        excluded_rule_ids = {"VSL-VM-002", "VSL-VM-014", "VSL-VM-003", "VSL-HOST-014"}
-        filtered_findings = []
-        for finding in report.findings:
-            item = self._as_dict(finding)
-            if self._excluded_report_item(item, excluded_rule_ids) or str(item.get("risk_level") or "") not in {"P1", "P2", "P3"}:
-                continue
-            filtered_findings.append(item)
-        findings_by_rule: dict[str, list[dict[str, Any]]] = {}
-        for item in filtered_findings:
-            findings_by_rule.setdefault(str(item.get("rule_id") or ""), []).append(item)
-
+        from vstacklens.reports.customer_caliber import DENIED_RULES, object_key as saved_object_key
+        excluded_rule_ids = DENIED_RULES
+        filtered_findings = shared_problems.projected_findings
         problems: list[dict[str, Any]] = []
         optimizations: list[dict[str, Any]] = []
-        snapshot_rule_ids = {"VSL-VM-001", "VSL-VM-007", "VSL-VM-022"}
-        snapshot_findings: list[dict[str, Any]] = []
-        for remediation in report.remediation_plan:
-            item = self._as_dict(remediation)
-            if self._excluded_report_item(item, excluded_rule_ids) and str(item.get("rule_id") or "") != "VSL-VM-015":
-                continue
-            rule_id = str(item.get("rule_id") or "")
-            level = str(item.get("risk_level") or "")
-            if level not in {"P1", "P2", "P3"}:
-                continue
-            linked_findings = findings_by_rule.get(rule_id, [])
-            if rule_id in snapshot_rule_ids:
-                snapshot_findings.extend(linked_findings)
-                continue
-            object_types = {str(finding.get("object_type") or "") for finding in linked_findings}
-            unit = self._finding_count_unit(rule_id, object_types)
-            cluster_names_for_item = set()
-            for finding in linked_findings:
-                object_path = str(finding.get("object_path") or "")
-                for cluster_name in cluster_names:
-                    if cluster_name and cluster_name in object_path:
-                        cluster_names_for_item.add(cluster_name)
-            if not cluster_names_for_item and rule_id.startswith("VSL-VC-"):
-                cluster_names_for_item.add("vCenter 管理平台")
-            steps = self._customer_steps(item.get("steps") or [], rule_id)
-            impact = next((
-                self._safe_customer_text(
-                    finding.get("business_impact")
-                    or finding.get("consequence")
-                    or finding.get("technical_impact")
-                )
-                for finding in linked_findings
-                if finding.get("business_impact") or finding.get("consequence") or finding.get("technical_impact")
-            ), "")
-            impact = impact or "本项由现有巡检规则列出，建议结合业务情况复核。"
-            if rule_id == "VSL-VM-018" and powered_off_note:
-                impact = append_report_sentence(impact, powered_off_note)
-            plan_item = {
-                "level": level,
-                "title": self._safe_customer_text(item.get("title")) or "环境核查建议",
-                "count": int(item.get("object_count") or 0),
-                "count_label": f"{int(item.get('object_count') or 0)} {unit}",
-                "clusters": "、".join(sorted(cluster_names_for_item, key=str.casefold)) or "未记录",
-                "impact": impact,
-                "remediation": "；".join(steps) or "按变更流程核实并复查。",
-                "steps": steps,
-                "steps_numbered": [f"{index + 1}. {step}" for index, step in enumerate(steps)],
-                "owner": self._role_label(item.get("owner_role")),
-                "effort": self._effort_label(item.get("effort")),
-                "maintenance_window_required": bool(item.get("maintenance_window_required")),
-                "verification": self._verification_label(item.get("verification_method")),
-                "rule_id": rule_id,
-            }
-            problems.append(plan_item)
-
-        if snapshot_findings:
-            distinct_snapshot_vms = {
-                str(item.get("object_key") or item.get("object_name") or "").strip()
-                for item in snapshot_findings
-                if str(item.get("object_key") or item.get("object_name") or "").strip()
-            }
-            snapshot_priority = {"P1": 1, "P2": 2, "P3": 3}
-            snapshot_level = min(
-                (
-                    str(item.get("risk_level") or "")
-                    for item in snapshot_findings
-                    if str(item.get("risk_level") or "") in snapshot_priority
-                ),
-                key=snapshot_priority.__getitem__,
-                default="P3",
-            )
-            snapshot_clusters = {
-                cluster_name
-                for item in snapshot_findings
-                for cluster_name in cluster_names
-                if cluster_name and cluster_name in str(item.get("object_path") or "")
-            }
-            snapshot_steps = [
-                "确认快照用途、创建时间和业务保留要求。",
-                "对不再需要的快照按维护流程删除或合并，并观察任务完成状态。",
-                "复查虚拟机性能与数据存储容量，再复跑巡检确认。",
-            ]
+        for entry in shared_problems.categories:
+            item = entry.display
+            first = entry.source_findings[0]
+            object_types = {obj["object_type"] for obj in item["objects"]}
+            unit = self._finding_count_unit(first.get("rule_id", ""), object_types)
             problems.append({
-                "level": snapshot_level,
-                "title": "虚拟机存在快照",
-                "count": len(distinct_snapshot_vms),
-                "count_label": f"{len(distinct_snapshot_vms)} 台虚拟机",
-                "clusters": "、".join(sorted(snapshot_clusters, key=str.casefold)),
-                "impact": "超期快照或过深快照链可能影响业务性能、备份稳定性和虚拟机维护。",
-                "remediation": "确认快照用途和保留要求；按维护流程清理无用快照并监控合并完成；复查数据存储容量并复跑巡检。",
-                "steps": snapshot_steps,
-                "steps_numbered": [f"{index + 1}. {step}" for index, step in enumerate(snapshot_steps)],
-                "owner": "虚拟化管理员",
-                "effort": "中",
-                "maintenance_window_required": True,
-                "verification": "复跑巡检",
-                "rule_id": "VM-SNAPSHOT",
+                "level": item["level"], "title": item["title"], "count": item["count"],
+                "count_label": f"{item['count']} {unit}", "clusters": "",
+                "current": item["current"], "impact": item["impact"],
+                "remediation": item["remediation"], "steps": item["steps"],
+                "expected": item.get("expected", ""),
+                "step_groups": item.get("step_groups", []),
+                "steps_numbered": [f"{i + 1}. {step}" for i, step in enumerate(item["steps"])],
+                "owner": self._role_label(first.get("owner_role")),
+                "effort": self._effort_label(first.get("remediation_effort")),
+                "verification": self._verification_label(first.get("verification_method")),
+                "rule_id": item["category_id"], "objects": entry.category["affected_objects"],
+                "evidence_rows": [{"name": self._break_long_tokens(obj["name"]), "level": obj["level"],
+                                   "scope": self._break_long_tokens(obj["location"]), "basis": self._break_long_tokens(obj["basis"]),
+                                   "object_key": obj["object_key"]} for obj in item["objects"]],
+                "basis": [obj["basis"] for obj in item["objects"]],
+                "technical": {"headers":item["technical"]["headers"],
+                              "rows":[[self._break_long_tokens(cell) for cell in row] for row in item["technical"]["rows"]]} if item["technical"] else None,
             })
-
         risk_counts = {level: sum(item["level"] == level for item in problems) for level in ("P1", "P2", "P3")}
         all_plan_counts = {level: sum(item["level"] == level for item in problems) for level in ("P1", "P2", "P3")}
-        affected_counts = {
-            level: sum(item["count"] for item in problems if item["level"] == level)
-            for level in ("P1", "P2", "P3")
-        }
+        affected_counts = caliber["affected_counts"]
         issue_count = len(problems)
         optimization_count = 0
-        issue_object_count = sum(affected_counts[level] for level in ("P1", "P2", "P3"))
+        issue_object_count = caliber["affected_total"]
         problems.sort(key=lambda item: ({"P1": 0, "P2": 1, "P3": 2}.get(item["level"], 9), item["title"].casefold()))
         optimizations.clear()
         object_type_counts: dict[str, int] = {}
@@ -838,152 +838,31 @@ class PdfReportEngine:
              "rule_name": self._safe_customer_text(item.get("rule_name") or item.get("title")) or "未命名规则"}
             for item in rule_checklist
         ]
-        p123_rule_levels = {
-            str(item.get("rule_id") or ""): str(item.get("risk_level") or "")
-            for item in (report_context.get("rule_catalog") or [])
-            if str(item.get("risk_level") or "") in {"P1", "P2", "P3"}
-            and not self._excluded_report_item(self._as_dict(item), excluded_rule_ids)
-        }
-        rule_check_names = {
-            str(item.get("rule_id") or ""): self._safe_customer_text(
-                item.get("check_name") or item.get("rule_name") or item.get("title")
-            )
-            for item in (report_context.get("rule_catalog") or [])
-            if item.get("rule_id")
-        }
-        for item in rule_checklist:
-            rule_id = str(item.get("rule_id") or "")
-            if rule_id and not rule_check_names.get(rule_id):
-                rule_check_names[rule_id] = self._safe_customer_text(
-                    item.get("rule_name") or item.get("title")
-                )
-        for finding in filtered_findings:
-            level = str(finding.get("risk_level") or "")
-            if level in {"P1", "P2", "P3"}:
-                p123_rule_levels.setdefault(str(finding.get("rule_id") or ""), level)
-        scope_order = ("vCenter", "集群", "ESXi 主机", "虚拟机", "数据存储", "网络", "vSAN")
-        scope_stats = {
-            name: {"total": 0, "passed": 0, "problems": 0, "highest_level": ""}
-            for name in scope_order
-        }
-        failed_level_counts = {level: 0 for level in ("P1", "P2", "P3")}
-        failed_check_counts: dict[tuple[str, str, str], int] = {}
-
-        def record_failed_check(rule_id: str, check_name: Any, scope_name: str, level: str) -> None:
-            label = self._safe_customer_text(check_name) or rule_check_names.get(rule_id) or "未命名检查项"
-            failed_level_counts[level] += 1
-            key = (label, scope_name, level)
-            failed_check_counts[key] = failed_check_counts.get(key, 0) + 1
-
-        scope_result_rows = list(report_context.get("object_results") or [])
-        represented_vsan_rules: set[str] = set()
-        for row in scope_result_rows:
-            rule_id = str(row.get("rule_id") or "")
-            if rule_id not in p123_rule_levels:
-                continue
-            status = str(row.get("result_status") or "")
-            if status not in {"passed", "failed"}:
-                continue
-            scope_name = (
-                "网络"
-                if rule_id == "VSL-HOST-019"
-                else self._scope_range_name(row.get("category"), row.get("object_type"))
-            )
-            if scope_name not in scope_stats:
-                continue
-            bucket = scope_stats[scope_name]
-            bucket["total"] += 1
-            if status == "passed":
-                bucket["passed"] += 1
-            else:
-                bucket["problems"] += 1
-                level = p123_rule_levels[rule_id]
-                record_failed_check(rule_id, row.get("check_name") or row.get("rule_name"), scope_name, level)
-                if not bucket["highest_level"] or {"P1": 1, "P2": 2, "P3": 3}[level] < {"P1": 1, "P2": 2, "P3": 3}[bucket["highest_level"]]:
-                    bucket["highest_level"] = level
-            if scope_name == "vSAN":
-                represented_vsan_rules.add(rule_id)
-        vsan_categories = (report_context.get("vsan_summary") or {}).get("report_categories") or vsan.get("report_categories") or []
-        for category in vsan_categories:
-            if not isinstance(category, dict) or category.get("status") not in {"正常", "需关注"}:
-                continue
-            rule_id = str((category.get("source_rule_ids") or [category.get("category_id") or ""])[0])
-            if rule_id in represented_vsan_rules:
-                continue
-            bucket = scope_stats["vSAN"]
-            bucket["total"] += 1
-            if category["status"] == "正常":
-                bucket["passed"] += 1
-            else:
-                bucket["problems"] += 1
-                level = str(category.get("priority") or category.get("risk_level") or "P3")
-                if level not in {"P1", "P2", "P3"}:
-                    level = "P3"
-                record_failed_check(
-                    rule_id,
-                    category.get("check_name") or category.get("title") or category.get("name"),
-                    "vSAN",
-                    level,
-                )
-                if not bucket["highest_level"] or {"P1": 1, "P2": 2, "P3": 3}[level] < {"P1": 1, "P2": 2, "P3": 3}[bucket["highest_level"]]:
-                    bucket["highest_level"] = level
+        from vstacklens.reports.presentation import customer_check_statistics
+        statistics = customer_check_statistics(report, report_context)
         scope_rows = []
-        for name in scope_order:
-            if name == "vSAN" and not has_vsan:
-                continue
-            bucket = scope_stats[name]
-            if bucket["total"] <= 0:
-                continue
-            scope_rows.append({
-                "name": name,
-                **bucket,
-                "pass_rate": round(bucket["passed"] * 100 / bucket["total"], 1),
-            })
-        scope_total_checks = sum(item["total"] for item in scope_rows)
-        scope_passed_checks = sum(item["passed"] for item in scope_rows)
-        scope_problem_checks = sum(item["problems"] for item in scope_rows)
+        for row in statistics["by_object_type_rows"]:
+            highest = next((level for level in ("P1", "P2", "P3") if row["levels"].get(level, 0)), "")
+            scope_rows.append({"name": row["label"], "total": row["total"], "passed": row["passed"],
+                               "problems": row["failed"], "highest_level": highest,
+                               "pass_rate": round(row["passed"] * 100 / row["total"], 1) if row["total"] else 0,
+                               "pass_rate_text": percent_text(row["passed"] * 100 / row["total"] if row["total"] else 0)})
+        scope_total_checks = statistics["total"]
+        scope_passed_checks = statistics["passed"]
+        scope_problem_checks = statistics["failed"]
+        failed_level_counts = {level: sum(row["levels"].get(level, 0) for row in statistics["by_object_type_rows"])
+                               for level in ("P1", "P2", "P3")}
         if sum(failed_level_counts.values()) != scope_problem_checks:
-            raise RuntimeError("未通过检查结果等级统计与巡检范围汇总不一致。")
-        level_distribution = [
-            {
-                "level": level,
-                "count": failed_level_counts[level],
-                "share_pct": round(failed_level_counts[level] * 100 / scope_problem_checks, 1)
-                if scope_problem_checks else 0.0,
-            }
-            for level in ("P1", "P2", "P3")
-        ]
-        level_order = {"P1": 0, "P2": 1, "P3": 2}
-        top_failed_checks = [
-            {
-                "name": key[0],
-                "scope": key[1],
-                "level": key[2],
-                "failed": count,
-            }
-            for key, count in sorted(
-                failed_check_counts.items(),
-                key=lambda pair: (
-                    -pair[1],
-                    level_order[pair[0][2]],
-                    pair[0][0].casefold(),
-                    pair[0][1].casefold(),
-                ),
-            )[:5]
-        ]
-        most_problematic_scope = max(scope_rows, key=lambda item: item["problems"], default=None)
-        scope_summary_text = (
-            f"本次共有 {scope_problem_checks} 条检查结果未通过，归并为 {issue_count} 项需处理问题，详见第 10 页。"
-            + (
-                f"未通过的检查结果主要集中在{most_problematic_scope['name']}，共 {most_problematic_scope['problems']} 条。"
-                if most_problematic_scope and most_problematic_scope["problems"] > 0
-                else "本次检查结果均通过。"
-            )
-        )
-        visible_result_counts = {
-            key: sum(int(item.get(key) or 0) for item in rule_checklist)
-            for key in ("passed", "failed", "unavailable", "not_applicable", "error")
-        }
+            raise RuntimeError("未通过检查结果等级统计与共同巡检汇总不一致。")
+        level_distribution = [{"level": level, "count": failed_level_counts[level],
+                               "share_pct": round(failed_level_counts[level] * 100 / scope_problem_checks, 1)
+                               if scope_problem_checks else 0.0,
+                               "share_pct_text": percent_text(failed_level_counts[level] * 100 / scope_problem_checks
+                                                              if scope_problem_checks else 0)} for level in ("P1", "P2", "P3")]
+        top_failed_checks = [{"name": row["name"], "scope": row["scope"], "level": row["highest_level"],
+                              "failed": row["failed"]} for row in statistics["top_failed_checks"]]
+        scope_summary_text = statistics["text"]
+        visible_result_counts = {"passed": statistics["passed"], "failed": statistics["failed"]}
         unavailable_source = report_context.get("unavailable_results") or (
             report.appendix.get("unavailable_rules", []) if isinstance(report.appendix, dict) else []
         ) or []
@@ -1149,6 +1028,8 @@ class PdfReportEngine:
             group["healthy"] += int(raw_health in healthy_tokens)
             group["disks"].append(disk)
         disk_groups = sorted(disk_group_map.values(), key=lambda item: (item["host"].casefold(), item["name"].casefold()))
+        for group in disk_groups:
+            group["health_known"] = any(item.get("key") == "disks" for item in display_facts["vsan"]["items"])
         policy_summary = vsan.get("storage_policy_summary") or {}
         policy_status = str(policy_summary.get("status") or policy_summary.get("api_status") or "unknown") if isinstance(policy_summary, dict) else "unknown"
         policy_vm_counts = {"collected": 0, "api_error": 0, "other": 0}
@@ -1163,7 +1044,8 @@ class PdfReportEngine:
         datastore_usage_rows = [item for item in datastores if item.get("usage") is not None]
         highest_datastore = max(datastore_usage_rows, key=lambda item: item["usage"], default=None)
         host_property_rows = [hosts_by_name.get(item["name"], {}) for item in host_details]
-        connected_host_count = sum(item.get("connection") == "已连接" for item in host_details)
+        # Maintenance is a display state; it must not erase a recorded connection.
+        connected_host_count = sum(str(item.get("connection_state") or "").casefold() == "connected" for item in host_property_rows)
         hardware_issue_total = sum(
             int(item["hardware_issue_count"] or 0)
             for item in host_details
@@ -1180,27 +1062,14 @@ class PdfReportEngine:
                 str(item.get("lockdown_mode") or "").casefold() not in {"", "disabled", "lockdowndisabled", "未启用"}
                 for item in host_property_rows
             ),
-            "portgroup_issues": sum(int(item.get("portgroup_security_issue_count") or 0) for item in host_property_rows if item.get("portgroup_security_issue_count") is not None),
-            "portgroup_details": [
-                {
-                    "host": host["name"],
-                    "switch": self._safe_customer_text(issue.get("switch")) or "未记录",
-                    "portgroup": self._safe_customer_text(issue.get("portgroup")) or "未记录",
-                    "setting": self._security_policy_label(issue.get("policy")),
-                    "current": self._security_value_label(issue.get("current_value")),
-                    "recommended": self._security_value_label(issue.get("recommended_value")),
-                }
-                for host in host_details
-                for issue in host["portgroup_security_issues"]
-                if self._security_policy_label(issue.get("policy"))
-                and self._security_value_label(issue.get("current_value"))
-                and self._security_value_label(issue.get("recommended_value"))
-            ],
         }
         appendix_iso_vms = []
         appendix_powered_off_vms = []
         appendix_snapshot_vms = []
         appendix_local_datastore_vms = []
+        local_problem_keys = {saved_object_key(obj) for entry in shared_problems.categories
+                              if entry.display["category_id"] == "VM-LOCAL-DATASTORE"
+                              for obj in entry.display["objects"]}
         for vm in vm_records:
             props = self._properties(vm)
             name = str(vm.get("name") or vm.get("object_name") or "").strip()
@@ -1221,7 +1090,7 @@ class PdfReportEngine:
                 appendix_iso_vms.append({
                     "name": name,
                     "host": host_name,
-                    "iso_paths": "、".join(str(item) for item in iso_paths if str(item).strip()),
+                    "iso_paths": self._break_long_tokens("、".join(str(item) for item in iso_paths if str(item).strip())),
                 })
             state = self._power_state(vm.get("powerState") or props.get("power_state"))
             is_template = props.get("is_template")
@@ -1235,22 +1104,37 @@ class PdfReportEngine:
                     "host": host_name,
                     "datastores": "、".join(str(item) for item in datastore_names if str(item).strip()),
                     "committed_gb": committed_gb,
+                    "committed_display_value": committed_bytes / (1024**3) if committed_bytes is not None and committed_bytes >= 0 else None,
                     "off_days": off_days,
                 })
             if self._has_snapshot(props):
+                snapshot_names: list[str] = []
+                snapshot_created: list[str] = []
+                saved_snapshots = props.get("snapshots") or props.get("snapshot_detail") or []
+                if isinstance(saved_snapshots, (list, tuple)):
+                    for snapshot in saved_snapshots:
+                        if not isinstance(snapshot, dict):
+                            continue
+                        snapshot_names.append(str(snapshot.get("name") or snapshot.get("snapshot_name") or "").strip())
+                        snapshot_created.append(local_time_text(
+                            snapshot.get("create_time") or snapshot.get("created_at") or snapshot.get("creation_time")
+                        ))
                 appendix_snapshot_vms.append({
                     "name": name,
                     "cluster": cluster_name,
                     "host": host_name,
                     "age_days": self._number(props.get("snapshot_age_days_max")),
                     "chain_depth": self._number(props.get("snapshot_chain_depth")),
+                    "snapshot_names": self._break_long_tokens("\n".join(snapshot_names)),
+                    "snapshot_created": self._break_long_tokens("\n".join(snapshot_created)),
                 })
-            if props.get("vm_on_local_datastore") is True and is_system_vm is False:
+            if saved_object_key({"object_type": "VirtualMachine", **vm}) in local_problem_keys:
                 appendix_local_datastore_vms.append({
                     "name": name,
                     "host": host_name,
                     "datastores": "、".join(str(item) for item in local_names if str(item).strip()),
                     "committed_gb": committed_gb,
+                    "committed_display_value": committed_bytes / (1024**3) if committed_bytes is not None and committed_bytes >= 0 else None,
                 })
         for rows in (appendix_iso_vms, appendix_powered_off_vms, appendix_snapshot_vms, appendix_local_datastore_vms):
             rows.sort(key=lambda item: str(item.get("name") or "").casefold())
@@ -1268,9 +1152,9 @@ class PdfReportEngine:
 
         context_statuses = report.environment_summary.result_status_summary or {}
         scope_payload = {
-            "visible_rule_count": len(rule_checklist),
+            "visible_rule_count": len(statistics["by_rule_rows"]),
             "visible_result_counts": visible_result_counts,
-            "visible_result_total": sum(visible_result_counts.values()),
+            "visible_result_total": statistics["total"],
             "unavailable_total": unavailable_total,
             "unavailable_rows": unavailable_rows,
             "not_applicable_total": not_applicable_total,
@@ -1283,21 +1167,27 @@ class PdfReportEngine:
             "problem_checks": scope_problem_checks,
             "level_distribution": level_distribution,
             "top_failed_checks": top_failed_checks,
-            "all_passed": scope_problem_checks == 0 and scope_total_checks > 0,
+            "all_passed": scope_problem_checks == 0 and scope_total_checks > 0 and not (unavailable_total or context_statuses.get("unavailable") or context_statuses.get("error")),
             "no_results": scope_total_checks == 0,
             "summary_text": scope_summary_text,
             "rule_checklist": rule_checklist,
         }
         payload = {
+            "wording": customer_labels(),
+            "customer_statistics": statistics,
+            "display_facts": display_facts,
             "customer_name": report.customer_info.customer_name or "未指定客户",
             "run_id": report.report_info.run_id,
             "report_date": capture_date,
             "capture_date": capture_date,
-            "conclusion": f"需关注，本次发现 {issue_count} 项需要处理" if issue_count else "运行正常",
+            "conclusion": caliber["health"]["label"],
+            "judgment_boundary": customer_judgment_metadata(report)["boundary"],
             "reporter": "VStackLens",
             "problem_count": issue_count,
             "optimization_count": optimization_count,
             "risk_counts": risk_counts,
+            "health_conclusion": caliber["health"]["label"],
+            "customer_caliber": {"version": caliber["version"], "counts": caliber["counts"], "affected_counts": caliber["affected_counts"], "affected_total": caliber["affected_total"], "health": caliber["health"]},
             "affected_counts": affected_counts,
             "issue_object_count": issue_object_count,
             "optimization_object_count": optimization_object_count,
@@ -1306,6 +1196,7 @@ class PdfReportEngine:
             "hardware_issue_column": hardware_issue_column,
             "power_policy_column": power_policy_column,
             "overcommit_host_count": overcommit_host_count,
+            "overcommit_display": str(overcommit_host_count) + "/" + str(len(host_details)) if host_details and all(x.get("overcommit") is not None for x in host_details) else "",
             "vmotion_host_total": vmotion_host_total,
             "security": security,
             "datastore_usage_known": len(datastore_usage_rows),
@@ -1321,6 +1212,7 @@ class PdfReportEngine:
             "max_issue_category_objects": max_issue_category_objects,
             "scope": scope_payload,
             "overview": {"highest_category": highest_category, "vm_state_counts": vm_state_counts},
+            "alarm_evidence": self._vcenter_alarm_evidence(report),
             "counts": {
                 "clusters": len(clusters),
                 "hosts": len(host_records),
@@ -1332,7 +1224,7 @@ class PdfReportEngine:
                 "powered_on": vm_state_counts["powered_on"],
                 "powered_off": vm_state_counts["powered_off"],
                 "suspended": vm_state_counts["suspended"],
-                "snapshot_vms": snapshot_vm_count,
+                "snapshot_vms": display_facts["snapshots"]["vm_count"],
                 "snapshot_max_age_days": max(known_snapshot_ages) if known_snapshot_ages else None,
             },
             "snapshot_distribution": snapshot_distribution,
@@ -1382,12 +1274,13 @@ class PdfReportEngine:
                     vsan.get("object_count"), vsan.get("vmdk_count"),
                 )),
                 "clusters": list(vsan.get("clusters") or []),
+                "vmkernel_interfaces": [f"{adapter.get('host_name') or adapter.get('host')} / {adapter.get('device')}" for adapter in (vsan.get("network") or {}).get("vmkernels", [])],
                 "total_gb": self._number(capacity.get("total_gb")),
-                "total_display": self._gb_number_text(capacity.get("total_gb")),
+                "total_display": capacity_text(capacity.get("total_gb")),
                 "used_gb": self._number(capacity.get("used_gb")),
-                "used_display": self._gb_number_text(capacity.get("used_gb")),
+                "used_display": capacity_text(capacity.get("used_gb")),
                 "free_gb": self._number(capacity.get("free_gb")),
-                "free_display": self._gb_number_text(capacity.get("free_gb")),
+                "free_display": capacity_text(capacity.get("free_gb")),
                 "used_percent": self._number(capacity.get("used_percent")),
                 "disk_count": disk_count,
                 "healthy_disks": disk_healthy,
@@ -1401,8 +1294,8 @@ class PdfReportEngine:
                 "resync_objects": resync_objects,
                 "resync_bytes": resync_bytes,
                 "no_resync": no_resync,
-                "resync_eta_seconds": 0 if no_resync else None,
-                "planned_resync_count": 0 if no_resync else None,
+                "resync_eta_seconds": self._number(vsan.get("resync_eta_seconds")),
+                "planned_resync_count": self._number(vsan.get("planned_resync_count")),
                 "storage_policy_summary": policy_summary,
                 "storage_policy_status": policy_status,
                 "storage_policy_failure": policy_status in {"api_error", "unavailable", "permission_denied", "unsupported"},
@@ -1412,13 +1305,15 @@ class PdfReportEngine:
                 "object_issue_count": self._number(vsan.get("object_issue_count")),
                 "used_percent_text": self._percent_text(capacity.get("used_percent")),
                 "resync_objects_text": "0" if no_resync else self._number_text(resync_objects),
-                "resync_bytes_text": "0 B" if no_resync else self._bytes_text(resync_bytes),
-                "resync_eta_text": "0 秒" if no_resync else "",
+                "resync_bytes_text": self._bytes_text(0 if no_resync else resync_bytes),
+                "resync_eta_text": f"{vsan['resync_eta_seconds']} 秒" if vsan.get("resync_eta_seconds") is not None else "",
                 "planned_resync_text": "0" if no_resync else "",
                 "resync_summary_text": (
-                    "当前无待重同步对象或数据 · 预计完成 0 秒 · 计划重同步 0"
-                    if no_resync
-                    else f"正在重同步对象 {self._number_text(resync_objects)} · 待重同步数据 {self._bytes_text(resync_bytes)}"
+                    "当前无待重同步对象或数据" if no_resync else
+                    " · ".join(part for part in [
+                        f"重同步对象 {self._number_text(resync_objects)} 个" if resync_objects is not None else "",
+                        f"待重同步数据 {self._bytes_text(resync_bytes)}" if resync_bytes is not None else "",
+                    ] if part)
                 ),
                 "disk_group_count_text": self._number_text(vsan.get("disk_group_count")),
                 "disk_count_text": self._number_text(disk_count),
@@ -1446,8 +1341,277 @@ class PdfReportEngine:
                 "checked_object_total": report.environment_summary.checked_object_total,
             },
         }
+        def certificate_display(entry: dict[str, Any] | None) -> dict[str, Any]:
+            entry = entry or {}
+            expiry = entry.get("expiry_date", "")
+            days = entry.get("days")
+            return {"name": entry.get("name", ""), "host": entry.get("name", ""),
+                    "object_key": entry.get("object_key", ""), "expiry": expiry,
+                    "expiry_display": f"{expiry}（剩余 {int(days)} 天）" if expiry and days is not None else expiry,
+                    "remaining_days": days, "date_source": entry.get("date_source", ""),
+                    "derived": entry.get("derived", False), "expiry_known": bool(expiry),
+                    "status": self._certificate_status(days),
+                    "attention": days is not None and 0 < days <= 90,
+                    "expired": days is not None and days <= 0}
+        payload["certificates"]["vcenter"] = certificate_display(display_facts["certificates"].get("vcenter"))
+        payload["certificates"]["hosts"] = [certificate_display(entry) for entry in display_facts["certificates"]["hosts"]]
+        payload["certificates"]["summary"] = ""
+        payload["problem_count"] = display_facts["counts"]["problem_count"]
+        payload["issue_object_count"] = display_facts["counts"]["affected_total"]
+        network["pnic_anomaly_count"] = display_facts["network"].get("active_link_anomalies")
+        network["error_count"] = display_facts["network"].get("error_count")
+        self._customer_display_fields(payload, hosts_by_name, host_memory_total_mb if host_memory_values else None)
         payload["narratives"] = build_pdf_narratives(payload)
+        vmk_complete = bool(host_property_rows) and all(isinstance(x.get("vmkernel_adapters"), list) for x in host_property_rows)
+        network["vmkernel_display"] = str(network["vmkernel_count"]) if vmk_complete or network["vmkernel_count"] else ""
+        network["pnic_anomaly_display"] = str(network["pnic_anomaly_count"]) + " 条" if network["pnic_anomaly_count"] is not None else ""
+        payload["narratives"]["network"] = display_facts["network"]["summary"]
+        payload["narratives"]["network_security"] = payload["narratives"]["network"] + payload["narratives"]["security"]
+        from vstacklens.reports.presentation import delivery_overview
+        payload["delivery"] = delivery_overview(report)
+        from vstacklens.reports.presentation import recorded_result_summary
+        payload["recorded_results"] = recorded_result_summary(report, report_context)
+        payload["has_vcenter"] = True
+        if report.product_modules:
+            payload["product_report"] = self._pdf_product_view(report)
+            if len(assessments) == 1:
+                payload["vcenter_target_name"] = assessments[0][0]["target_name"]
+                payload["vcenter_target_id"] = assessments[0][0]["target_id"]
+        else:
+            payload["product_report"] = None
         return payload
+
+    def _customer_display_fields(self, payload: dict[str, Any], host_properties: dict[str, Any], total_memory_mb: float | None) -> None:
+        """Attach shared, rounded display strings while preserving calculation values."""
+        payload["capacity_note"] = CAPACITY_NOTE
+        payload["highest_host_memory_text"] = percent_text(payload.get("highest_host_memory_pct"))
+        payload["counts"]["memory_total_text"] = capacity_text(total_memory_mb / 1024 if total_memory_mb is not None else None)
+        for host in payload["host_details"]:
+            props = host_properties.get(host["name"], {})
+            host["cpu_pct_text"] = percent_text(host.get("cpu_pct"))
+            host["memory_pct_text"] = percent_text(host.get("memory_pct"))
+            allocation = self._number(props.get("host_memory_allocation_ratio"))
+            host["memory_allocation_text"] = percent_text(allocation * 100 if allocation is not None else None)
+        memory_values = [self._number(host_properties.get(host["name"], {}).get("host_memory_capacity_mb"))
+                         for host in payload["host_details"]]
+        host_unit = capacity_unit([value / 1024 for value in memory_values if value is not None])
+        payload["host_memory_unit"] = host_unit
+        allocation_values = [self._number(host_properties.get(host["name"], {}).get(key))
+                             for host in payload["host_details"]
+                             for key in ("host_memory_allocated_mb", "host_memory_capacity_mb")]
+        allocation_unit = capacity_unit([value / 1024 for value in allocation_values if value is not None])
+        for host in payload["host_details"]:
+            props = host_properties.get(host["name"], {})
+            cap = self._number(props.get("host_memory_capacity_mb"))
+            allocated = self._number(props.get("host_memory_allocated_mb"))
+            host["memory_capacity_text"] = capacity_text(cap / 1024 if cap is not None else None,
+                                                         unit=host_unit, with_unit=False)
+            host["memory_allocation_capacity_text"] = (
+                capacity_text(allocated / 1024, unit=allocation_unit, with_unit=False) + "/"
+                + capacity_text(cap / 1024, unit=allocation_unit)
+                if allocated is not None and cap is not None else "")
+        services = payload["display_facts"].get("host_services", [])
+        for host in payload["host_details"]:
+            matches = [row for row in services if row.get("name") == host["name"]]
+            if len(matches) == 1:
+                host["ssh"] = matches[0].get("ssh_state", "")
+                host["esxi_shell"] = matches[0].get("shell_state", "")
+                summary_parts = host["security_summary"].split("；")
+                host["security_summary"] = "；".join(
+                    matches[0].get("ssh_summary", part) if part.startswith("远程 SSH ") else
+                    matches[0].get("shell_summary", part) if part.startswith("本地 Shell ") else part
+                    for part in summary_parts if part)
+        for cluster in payload["cluster_details"]:
+            cluster["cpu_usage_text"] = percent_text(cluster.get("cpu_usage_pct"))
+            cluster["memory_skew_text"] = percent_text(cluster.get("memory_skew_pct"))
+            matches = [row for row in payload["display_facts"]["clusters"] if row.get("name") == cluster["name"]]
+            if len(matches) == 1:
+                cluster["evc_enabled"] = matches[0].get("evc_state", cluster["evc_enabled"])
+        for key in ("top_cpu", "top_memory", "top_capacity", "top_vcpu"):
+            rows = payload[key]
+            unit = capacity_unit([row["value"] / 1024 if key == "top_memory" else row["value"] for row in rows])
+            for row in rows:
+                row.setdefault("host_share_text", percent_text(row.get("host_share_pct")))
+                if key in {"top_memory", "top_capacity"}:
+                    row["display"] = capacity_text(row["value"] / 1024 if key == "top_memory" else row["value"], unit=unit)
+        for key in ("powered_off_vms", "local_datastore_vms"):
+            rows = payload["appendix"][key]
+            unit = capacity_unit([row.get("committed_display_value") for row in rows])
+            for row in rows:
+                row["committed_text"] = capacity_text(row.get("committed_display_value"), unit=unit)
+
+    def _vcenter_alarm_evidence(self, report: ReportData) -> dict[str, Any]:
+        """Project one original alarm list, preserving its row associations.
+
+        Finding evidence and inventory are alternate snapshots, not additional
+        alarms. Never infer an alarm's entity, acknowledgement or trigger time
+        from its containing vCenter finding or the report generation time.
+        """
+        sources = []
+        for index, finding in enumerate(report.findings):
+            if finding.rule_id != "VSL-VC-004":
+                continue
+            for suffix, value in (
+                ("observed_detail", finding.observed_detail),
+                ("evidence.observed_detail", finding.evidence.get("observed_detail")),
+                ("raw_evidence.observed_detail", finding.raw_evidence.get("observed_detail")),
+            ):
+                if isinstance(value, dict):
+                    sources.append((f"findings[{index}].{suffix}", value))
+        details = (report.asset_inventory or {}).get("details") or {}
+        inventory_rows = self._records(details, "vCenter")
+        for index, record in enumerate(inventory_rows):
+            sources.append((f"asset_inventory.details.vCenter[{index}].properties", self._properties(record)))
+
+        selected_path, selected, alarms = "", {}, None
+        for path, source in sources:
+            for key in ("active_red_alarms", "red_alarms", "alarms", "alarm_details"):
+                if key in source:
+                    selected_path, selected, alarms = path + "." + key, source, source[key]
+                    break
+            if selected_path:
+                break
+        rows = []
+        invalid_count = 0
+        for index, alarm in enumerate(alarms if isinstance(alarms, list) else []):
+            if not isinstance(alarm, dict):
+                invalid_count += 1
+                continue
+            def field(*keys):
+                for key in keys:
+                    if key in alarm and alarm[key] is not None and alarm[key] != "":
+                        return alarm[key]
+                return None
+            acknowledgement = field("acknowledged", "acknowledgement", "acknowledgment")
+            acknowledgement = ("是（已确认）" if acknowledgement else "否（未确认）") if isinstance(acknowledgement, bool) else acknowledgement
+            entity_id = field("entity_id", "entity_moid", "object_key", "object_id")
+            alarm_id = field("alarm_id", "alarm_moid", "key")
+            rows.append({
+                "alarm": str(field("alarm_name", "name", "definition_name") or "未采集"),
+                "entity": str(field("entity_name", "object_name", "target") or "未采集"),
+                "status": str(field("status", "overall_status", "overallStatus", "color", "severity") or "未采集"),
+                "acknowledged": str(acknowledgement) if acknowledgement is not None else "未采集",
+                "time": local_time_text(field("time", "created_time", "triggered_time")),
+                "entity_id": str(entity_id) if entity_id is not None else None,
+                "alarm_id": str(alarm_id) if alarm_id is not None else None,
+                "source_path": f"{selected_path}[{index}]",
+            })
+        metadata = next((source for _, source in reversed(sources) if "alarm_detail_collection_status" in source), selected)
+        collection_status = str(metadata.get("alarm_detail_collection_status") or "unavailable")
+        count = selected.get("red_alarm_count", metadata.get("red_alarm_count"))
+        complete_empty = isinstance(alarms, list) and not alarms and count == 0 and collection_status == "collected"
+        if invalid_count or (isinstance(count, (int, float)) and count != len(rows)):
+            collection_status = "partial"
+            complete_empty = False
+        if complete_empty:
+            notice = "本次已读取活动告警，未发现红色活动告警。"
+        elif rows:
+            notice = "以下逐条保留源告警与对象的对应关系；未采集字段不据此推断。"
+            if collection_status != "collected" or invalid_count:
+                notice += "告警明细读取受限或不完整，不能将未列出的告警视为不存在。"
+        else:
+            notice = "未取得可核对的活动告警明细；读取缺失或受限，不代表没有告警。"
+        return {"rows": rows, "render_rows": self._alarm_render_rows(rows),
+                "collection_status": collection_status, "reported_count": count,
+                "invalid_entry_count": invalid_count, "notice": notice, "source_path": selected_path}
+
+    def _alarm_render_rows(self, rows: list[dict[str, Any]]) -> list[list[str]]:
+        """Bound tall alarm rows losslessly and repeat their short state cells."""
+        result = []
+        weights = (1.8, 1.3, 0.6, 0.8, 1.2)
+        for row in rows:
+            values = [row["alarm"] + ("\n告警 ID：" + row["alarm_id"] if row["alarm_id"] else ""),
+                      row["entity"] + ("\n对象 ID：" + row["entity_id"] if row["entity_id"] else ""),
+                      row["status"], row["acknowledged"], row["time"]]
+            parts = [self._product_cell_parts(value, (297 - 20) * 72 / 25.4 * weights[index] / sum(weights) - 10)
+                     for index, value in enumerate(values)]
+            for fragment in range(max(map(len, parts), default=1)):
+                cells = [items[fragment] if fragment < len(items) else items[0] if len(items) == 1
+                         else "（本字段已在前段列完）" for items in parts]
+                if fragment:
+                    cells[0] += f"\n（同一告警续段 {fragment + 1}）"
+                result.append([re.sub(r"\S{17,}", lambda match: "\u200b".join(match.group(0)[i:i + 16]
+                               for i in range(0, len(match.group(0)), 16)), value) for value in cells])
+        return result
+
+    @staticmethod
+    def _break_long_tokens(value: str) -> str:
+        # Presentation-only break opportunities; every original character stays.
+        # The source ReportData and stored object evidence remain byte-for-byte.
+        return re.sub(r"\S{28,}", lambda match: "\u200b".join(match.group(0)[i:i + 24]
+                                                               for i in range(0, len(match.group(0)), 24)), str(value))
+
+    def _pdf_product_view(self, report: ReportData) -> dict[str, Any]:
+        from vstacklens.products.reporting import product_report_view
+        view = product_report_view(report)
+        def cell(value, weight=1, total=1):
+            # This template is A4 landscape with 10 mm side margins and 5 pt
+            # cell insets. Bound an unbreakable piece by the actual column,
+            # using a full-width 10.5 pt glyph as the conservative estimate.
+            # Existing vCenter/ISO presentation and public evidence are not
+            # changed. Only this derived product PDF view receives soft breaks.
+            column_points = (297 - 20) * 72 / 25.4 * weight / total - 10
+            size = max(4, min(24, int(column_points / 10.5)))
+            return re.sub(r"\S{" + str(size + 1) + r",}",
+                          lambda match: "\u200b".join(match.group(0)[i:i + size]
+                              for i in range(0, len(match.group(0)), size)), str(value))
+        for target in view.get("targets") or []:
+            for field, weight in (("name", 1), ("address", 1), ("limits", 2)):
+                if target.get(field):
+                    target[field] = cell(target[field], weight, 4)
+        view["navigation"] = [cell(item) for item in view.get("navigation") or []]
+        for section in view["sections"]:
+            section["name"] = cell(section["name"])
+            for alert in section["native_alerts"]:
+                alert["time"] = self._break_long_tokens(alert["time"])
+            body = section.get("body") or {}
+            for table in body.get("tables") or []:
+                weights = table.get("weights") or [1] * len(table["columns"])
+                total = sum(weights)
+                rows = []
+                for row in table.get("rows") or []:
+                    parts = [self._product_cell_parts(str(value),
+                                (297 - 20) * 72 / 25.4 * weights[i] / total - 10)
+                             for i, value in enumerate(row)]
+                    for fragment in range(max(map(len, parts), default=1)):
+                        values = [items[fragment] if fragment < len(items)
+                                  else items[0] if len(items) == 1 else "（本字段已在前段列完）"
+                                  for items in parts]
+                        if fragment:
+                            values[0] += f"\n（同一对象续段 {fragment + 1}）"
+                        rows.append([cell(value, weights[i], total) for i, value in enumerate(values)])
+                table["rows"] = rows
+            for field in ("empty_business_text", "conclusion"):
+                if body.get(field):
+                    body[field] = self._break_long_tokens(str(body[field]))
+        return view
+
+    @staticmethod
+    def _product_cell_parts(value: str, width_points: float) -> list[str]:
+        """Bound derived table fragments without discarding even whitespace.
+
+        Product and alarm tables repeat short identity/evidence cells for each
+        fragment, allowing page breaks between bounded rows.
+        This is a layout estimate, never a substitute for rendered geometry QA.
+        """
+        line_units = max(24, int(width_points / 5.25))
+        budget = line_units * 12
+        parts = []
+        while value:
+            units, boundary = 0, 0
+            for index, char in enumerate(value):
+                units += line_units if char == "\n" else 0 if char == "\u200b" else 1 if ord(char) < 128 else 2
+                if units > budget:
+                    cut = boundary if boundary > index // 2 else index
+                    parts.append(value[:cut])
+                    value = value[cut:]
+                    break
+                if char.isspace():
+                    boundary = index + 1
+            else:
+                parts.append(value)
+                value = ""
+        return parts or [""]
 
     def _report_asset_views(
         self,
@@ -1559,31 +1723,17 @@ class PdfReportEngine:
         return {}
 
     def _excluded_report_item(self, item: dict[str, Any], excluded_rule_ids: set[str]) -> bool:
-        if str(item.get("rule_id") or "") in excluded_rule_ids:
-            return True
-        text_parts = [
-            item.get(key)
-            for key in (
-                "title", "rule_name", "rule_id", "description", "reason",
-                "unavailable_reason", "message", "current_value_zh", "expected_value_zh",
-            )
-        ]
-        steps = item.get("steps") or []
-        text_parts.extend(steps if isinstance(steps, (list, tuple)) else [steps])
-        text = " ".join(str(value or "") for value in text_parts).casefold()
-        return "syslog" in text or "vmware tools" in text
+        from vstacklens.reports.customer_caliber import reportable_result
+        return not reportable_result(item)
 
     def _safe_customer_text(self, value: Any) -> str:
+        from vstacklens.reports.customer_view import customer_wording
         text = str(value or "").strip()
         text = text.replace("TSM-SSH", "SSH")
         folded = text.casefold()
-        if (
-            "syslog" in folded
-            or "vmware tools" in folded
-            or folded in {"未采集", "未确认", "未记录", "未知", "missing", "not collected", "not_collected", "unknown", "none"}
-        ):
+        if folded in {"未采集", "未确认", "待确认", "未记录", "未知", "missing", "not collected", "not_collected", "unknown", "none"}:
             return ""
-        return text
+        return customer_wording(text)
 
     def _scope_range_name(self, category: Any, object_type: Any) -> str:
         category_key = str(category or "").strip().casefold().replace("_", "-")
@@ -1703,12 +1853,6 @@ class PdfReportEngine:
         output = []
         for step in steps:
             text = str(step or "").strip().replace("TSM-SSH", "SSH")
-            folded = text.casefold()
-            if "syslog" in folded or "vmware tools" in folded:
-                if rule_id == "VSL-VM-015":
-                    text = "核对客户机操作系统与目标虚拟硬件版本的兼容性，并在维护前完成备份。"
-                else:
-                    continue
             if text:
                 output.append(text)
         return output
@@ -1731,7 +1875,7 @@ class PdfReportEngine:
 
     def _verification_label(self, value: Any) -> str:
         labels = {
-            "rerun_rule": "复跑对应检查",
+            "rerun_rule": "重新巡检",
             "manual_check": "人工复核",
             "command_check": "命令或工具复核",
         }
@@ -1784,14 +1928,7 @@ class PdfReportEngine:
         return f"{number:g} Mbit/s"
 
     def _bytes_text(self, value: Any) -> str:
-        number = self._number(value)
-        if number is None:
-            return ""
-        if number >= 1024**3:
-            return f"{number / (1024**3):,.1f} GB"
-        if number >= 1024**2:
-            return f"{number / (1024**2):,.1f} MB"
-        return f"{number:,.0f} B"
+        return capacity_bytes_text(value)
 
     def _vmkernel_row(self, host_name: str, item: dict[str, Any]) -> dict[str, Any]:
         label = item.get("network_label") or item.get("portgroup")
@@ -1844,17 +1981,17 @@ class PdfReportEngine:
 
     def _percent_text(self, value: Any) -> str:
         number = self._number(value)
-        return "" if number is None else f"{number:.1f}%"
+        return percent_text(number)
 
     def _capacity_text(self, value: Any) -> str:
         number = self._number(value)
-        return "" if number is None else f"{number:,.1f} GB"
+        return capacity_text(number)
 
     def _gb_number_text(self, value: Any) -> str:
         number = self._number(value)
         if number is None:
             return ""
-        return f"{number:,.1f}" if number % 1 else f"{number:,.0f}"
+        return decimal_text(number, grouping=True)
 
     def _text(self, value: Any) -> str:
         text = str(value or "").strip()

@@ -63,6 +63,7 @@ class HistoryComparisonBuilder:
         baseline_run_id: str | None = None,
         comparison_run_id: str | None = None,
     ) -> dict[str, Any]:
+        self._caliber_cache = {}
         latest = self._latest_successful_run(conn)
         if latest is None:
             return self._empty(STATE_EMPTY, SUMMARY_EMPTY, [])
@@ -116,6 +117,10 @@ class HistoryComparisonBuilder:
                 baseline,
             )
 
+        first = self._caliber(conn, baseline["run_id"])
+        second = self._caliber(conn, comparison["run_id"])
+        if first["state"] != "complete" or second["state"] != "complete":
+            return self._non_comparable(conn, "legacy_caliber", "旧口径：当次证据不完整，不与新口径混合对比。", options, environment_label, comparison, baseline)
         baseline_risks = self._risk_counts(conn, baseline["run_id"])
         comparison_risks = self._risk_counts(conn, comparison["run_id"])
         baseline_assets = self._asset_counts(conn, baseline["run_id"])
@@ -140,6 +145,8 @@ class HistoryComparisonBuilder:
                 level: self._count_delta(baseline_risks.get(level, 0), comparison_risks.get(level, 0))
                 for level in RISK_LEVELS
             },
+            "affected_objects": self._count_delta(first["affected_total"], second["affected_total"]),
+            "health_conclusions": {"baseline": first["health"], "comparison": second["health"]},
             "asset_counts": {
                 key: {
                     **self._count_delta(baseline_assets.get(key, 0), comparison_assets.get(key, 0)),
@@ -206,6 +213,8 @@ class HistoryComparisonBuilder:
             "comparison_time": "",
             "score": {"baseline": None, "comparison": None, "delta": None, "direction": "same"},
             "risk_counts": {level: self._count_delta(0, 0) for level in RISK_LEVELS},
+            "affected_objects": {"baseline": None, "comparison": None, "delta": None},
+            "health_conclusions": {},
             "asset_counts": {
                 key: {**self._count_delta(0, 0), "label": label} for key, (_, label) in ASSET_TYPES.items()
             },
@@ -290,9 +299,12 @@ class HistoryComparisonBuilder:
         time_text = self._format_time(self._run_time(row))
         environment = self._row_text(row, "vcenter_host") or self._row_text(row, "vcenter_name")
         risks = self._risk_counts(conn, row["run_id"])
-        score = "--" if row["score"] is None else row["score"]
+        score = ""
         prefix = f"{time_text} · {environment}" if environment else time_text
-        return f"{prefix} · 健康度 {score} · 风险 {actionable_risk_total(risks)} · 优化建议 {int(risks.get(OPTIMIZATION_LEVEL, 0) or 0)}"
+        caliber = self._caliber(conn, row["run_id"])
+        if caliber["state"] != "complete":
+            return f"{prefix} · 旧口径"
+        return f"{prefix} · 问题类别 {caliber['problem_count']} · 去重对象 {caliber['affected_total']} · {caliber['health']['label']}"
 
     def _environment_label(self, row: sqlite3.Row) -> str:
         host = self._row_text(row, "vcenter_host")
@@ -355,27 +367,17 @@ class HistoryComparisonBuilder:
         text = value.replace("T", " ").replace("+00:00", "")
         return text[:16]
 
+    def _caliber(self, conn: sqlite3.Connection, run_id: str) -> dict:
+        from vstacklens.application.caliber_reader import load_connection
+        cache = getattr(self, "_caliber_cache", {})
+        if run_id not in cache:
+            cache[run_id] = load_connection(conn, run_id)
+        self._caliber_cache = cache
+        return cache[run_id]
+
     def _risk_counts(self, conn: sqlite3.Connection, run_id: str) -> dict[str, int]:
-        run = conn.execute("SELECT risk_summary_json, risk_category_summary_json FROM inspection_runs WHERE run_id = ?", (run_id,)).fetchone()
-        payload = self._json((run["risk_category_summary_json"] or run["risk_summary_json"]) if run else None)
-        if payload:
-            result = {level: int(payload.get(level, 0) or 0) for level in RISK_LEVELS}
-            result[OPTIMIZATION_LEVEL] = int(payload.get(OPTIMIZATION_LEVEL, 0) or 0)
-            return result
-        rows = conn.execute(
-            """
-            SELECT risk_level, COUNT(*) AS c
-            FROM rule_results
-            WHERE run_id = ? AND result_status = 'failed'
-            GROUP BY risk_level
-            """,
-            (run_id,),
-        ).fetchall()
-        counts = {level: 0 for level in (*RISK_LEVELS, OPTIMIZATION_LEVEL)}
-        for row in rows:
-            if row["risk_level"] in counts:
-                counts[row["risk_level"]] = int(row["c"] or 0)
-        return counts
+        caliber = self._caliber(conn, run_id)
+        return {level: int(caliber["counts"].get(level, 0) or 0) for level in (*RISK_LEVELS, OPTIMIZATION_LEVEL)}
 
     def _asset_counts(self, conn: sqlite3.Connection, run_id: str) -> dict[str, int]:
         rows = conn.execute(
@@ -397,21 +399,14 @@ class HistoryComparisonBuilder:
         }
 
     def _failed_risk_map(self, conn: sqlite3.Connection, run_id: str) -> dict[str, dict[str, Any]]:
-        rows = conn.execute(
-            """
-            SELECT rr.*, r.rule_name, r.definition_json
-            FROM rule_results rr
-            LEFT JOIN rules r ON r.rule_id = rr.rule_id
-            WHERE rr.run_id = ? AND rr.result_status = 'failed'
-              AND rr.risk_level IN ('P1', 'P2', 'P3')
-            ORDER BY rr.risk_level, rr.object_type, rr.object_name
-            """,
-            (run_id,),
-        ).fetchall()
-        result: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            item = self._risk_item(row)
-            result[item["match_key"]] = item
+        caliber = self._caliber(conn, run_id)
+        result = {}
+        for category in caliber["categories"]:
+            for obj in category["affected_objects"]:
+                key = f"{category['category_id']}|{obj['object_type']}|{obj['object_key']}"
+                result[key] = {"match_key": key, "title": category["title"], "risk_level": obj["risk_level"],
+                               "object_type": obj["object_type"], "object_type_label": OBJECT_TYPE_LABELS.get(obj["object_type"], obj["object_type"]),
+                               "object_name": obj["object_name"], "current_observed": "", "expected_state": ""}
         return result
 
     def _risk_item(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -549,14 +544,6 @@ class HistoryComparisonBuilder:
 
     def _summary_text(self, score_delta: Any, risk_total_delta: int, risk_changes: dict[str, list[dict[str, Any]]]) -> str:
         parts = []
-        if score_delta is None:
-            parts.append("健康评分暂无可比变化")
-        elif score_delta > 0:
-            parts.append(f"健康评分提升 {score_delta}")
-        elif score_delta < 0:
-            parts.append(f"健康评分下降 {abs(score_delta)}")
-        else:
-            parts.append("健康评分无变化")
         if risk_total_delta > 0:
             parts.append(f"风险总数增加 {risk_total_delta}")
         elif risk_total_delta < 0:

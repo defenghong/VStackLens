@@ -186,6 +186,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: drs_enabled == False
     fail_when: drs_disabled_rule_count > 0
     pass_when: drs_disabled_rule_count == 0
   severity_policy: *fixed_p4
@@ -656,7 +657,7 @@ rules:
   rule_name: VM snapshot chain depth
   category: vm
   object_type: VirtualMachine
-  risk_level: P3
+  risk_level: P2
   health_impact: none
   confidence_level: high
   enabled: true
@@ -682,11 +683,12 @@ rules:
       override_allowed: true
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: snapshot_chain_depth > max_snapshot_chain_depth
     pass_when: snapshot_chain_depth <= max_snapshot_chain_depth
   severity_policy:
     type: fixed
-    default_level: P3
+    default_level: P2
     rules: []
   evidence_schema:
     current_value_path: snapshot_chain_depth
@@ -752,6 +754,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: nonpersistent_disk_count > 0
     pass_when: nonpersistent_disk_count == 0
   severity_policy: *fixed_p4
@@ -819,6 +822,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: numa_affinity_configured == True
     pass_when: numa_affinity_configured == False
   severity_policy: *fixed_p4
@@ -887,6 +891,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
+    not_applicable_when: is_template == True
     fail_when: vmware_tools_installed == False
     pass_when: vmware_tools_installed == True
   severity_policy:

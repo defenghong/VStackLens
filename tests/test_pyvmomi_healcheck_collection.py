@@ -461,7 +461,7 @@ def test_physical_nic_rule_ignores_down_adapters_without_switch_binding() -> Non
     cluster = _cluster("vSAN")
     raw_hosts = []
 
-    for address in ("192.168.10.64", "192.168.10.67", "192.168.10.68"):
+    for address in ("192.0.2.64", "192.0.2.67", "192.0.2.68"):
         host = _host(address, cluster)
         network = _sample_host_physical_nics(host)
         raw_host = collector._host_object(host)
@@ -486,13 +486,13 @@ def test_physical_nic_rule_ignores_down_adapters_without_switch_binding() -> Non
     _, executable_rules = _load_rules()
     results = RuleExecutor().execute(_run_context(), inventory, executable_rules)
     pnic_results = [item for item in results if item["rule_id"] == "VSL-HOST-019"]
-    assert {item["object_name"] for item in pnic_results} == {"192.168.10.64", "192.168.10.67", "192.168.10.68"}
+    assert {item["object_name"] for item in pnic_results} == {"192.0.2.64", "192.0.2.67", "192.0.2.68"}
     assert all(item["result_status"] == "passed" for item in pnic_results)
 
 
 def test_physical_nic_rule_reports_only_bound_down_or_mismatched_links() -> None:
     collector = _collector()
-    host = _host("192.168.10.64", _cluster("vSAN"))
+    host = _host("192.0.2.64", _cluster("vSAN"))
     network = _sample_host_physical_nics(host)
     vmnic2 = next(item for item in network.pnic if item.device == "vmnic2")
     vmnic2.linkSpeed = NS(speedMb=1000, duplex=True)
@@ -517,7 +517,7 @@ def test_physical_nic_rule_reports_only_bound_down_or_mismatched_links() -> None
 
 def test_active_portgroup_uplink_down_is_reported() -> None:
     collector = _collector()
-    host = _host("192.168.10.64", _cluster("vSAN"))
+    host = _host("192.0.2.64", _cluster("vSAN"))
     network = _sample_host_physical_nics(host)
     network.vswitch[0].pnic.append("key-vim.host.PhysicalNic-vmnic1")
     _set_standard_portgroup_usage(network, active=("vmnic1",))
@@ -533,7 +533,7 @@ def test_active_portgroup_uplink_down_is_reported() -> None:
 
 def test_standby_portgroup_uplink_down_is_reported() -> None:
     collector = _collector()
-    host = _host("192.168.10.64", _cluster("vSAN"))
+    host = _host("192.0.2.64", _cluster("vSAN"))
     network = _sample_host_physical_nics(host)
     network.vswitch[0].pnic.append("key-vim.host.PhysicalNic-vmnic1")
     _set_standard_portgroup_usage(network, active=("vmnic0",), standby=("vmnic1",), port_type="virtualMachine")
@@ -547,7 +547,7 @@ def test_standby_portgroup_uplink_down_is_reported() -> None:
 
 def test_bound_uplink_excluded_by_all_portgroup_team_orders_is_not_reported() -> None:
     collector = _collector()
-    host = _host("192.168.10.64", _cluster("vSAN"))
+    host = _host("192.0.2.64", _cluster("vSAN"))
     network = _sample_host_physical_nics(host)
     network.vswitch[0].pnic.append("key-vim.host.PhysicalNic-vmnic1")
     _set_standard_portgroup_usage(network, active=("vmnic0",), standby=(), port_type="host")
@@ -563,7 +563,7 @@ def test_bound_uplink_excluded_by_all_portgroup_team_orders_is_not_reported() ->
 
 def test_portgroup_without_vm_or_vmk_is_not_reported_even_if_it_lists_uplink() -> None:
     collector = _collector()
-    host = _host("192.168.10.64", _cluster("vSAN"))
+    host = _host("192.0.2.64", _cluster("vSAN"))
     network = _sample_host_physical_nics(host)
     network.vswitch[0].pnic.append("key-vim.host.PhysicalNic-vmnic1")
     network.portgroup[0].computedPolicy = NS(
@@ -581,7 +581,7 @@ def test_portgroup_without_vm_or_vmk_is_not_reported_even_if_it_lists_uplink() -
 
 def test_standard_portgroup_inherits_switch_teaming_order() -> None:
     collector = _collector()
-    host = _host("192.168.10.64", _cluster("vSAN"))
+    host = _host("192.0.2.64", _cluster("vSAN"))
     network = _sample_host_physical_nics(host)
     network.vswitch[0].pnic.append("key-vim.host.PhysicalNic-vmnic1")
     network.portgroup[0].port = [NS(type="host")]
@@ -601,7 +601,7 @@ def test_standard_portgroup_inherits_switch_teaming_order() -> None:
 
 def test_distributed_uplink_name_maps_back_to_physical_nic() -> None:
     collector = _collector()
-    host = _host("192.168.10.64", _cluster("vSAN"))
+    host = _host("192.0.2.64", _cluster("vSAN"))
     network = _sample_host_physical_nics(host)
     network.vnic = [
         NS(
@@ -950,7 +950,7 @@ def test_unavailable_vsan_collection_does_not_create_customer_finding_or_leak_er
     payload_text = (output_dir / "data" / "customer_report_payload.json").read_text(encoding="utf-8")
     index_text = (output_dir / "index.html").read_text(encoding="utf-8")
     customer_text = payload_text + index_text
-    for forbidden in ["TimeoutError", "traceback", "site-packages", "C:\\Users", "D:\\软件开发", "certificate verify failed"]:
+    for forbidden in ["TimeoutError", "traceback", "site-packages", "C:\\Users", "D:\\ExampleProject", "certificate verify failed"]:
         assert forbidden not in customer_text
 
 
@@ -991,9 +991,19 @@ def test_healcheck_collected_fields_flow_to_rules_and_report_payload(tmp_path: P
     payload = json.loads((output_dir / "data" / "customer_report_payload.json").read_text(encoding="utf-8"))
     payload_text = json.dumps(payload, ensure_ascii=False)
 
-    assert "虚拟机运行在本地存储上" in payload_text
+    assert "虚拟机磁盘存放在本地存储" in payload_text
+    assert "虚拟机运行在本地存储" not in payload_text
     assert "ESXi 主机硬件健康状态异常" in payload_text
-    assert "vSAN 存储健康存在异常" in payload_text
+    assert "vSAN 存储健康存在异常" not in payload_text
+    assert any(item["rule_id"] == "VSL-DS-020" for item in report.customer_caliber["internal_bridges"])
     assert "主机资源分配比例偏高" in payload_text
-    assert all(item["name"] != "vCLS-4c4c4544-004d-3010" for item in payload["inventory"]["vms"])
+    document = payload["document"]
+    inventory = next((table for table in document["appendices"] if table["id"] == "vms"), None)
+    expected_names = {item["object_name"] for item in report.asset_inventory["details"].get("VirtualMachine", [])}
+    visible_names = {row["name"] for row in inventory["rows"]} if inventory else set()
+    assert visible_names == expected_names
+    # Captured system assets remain visible in the full inventory; they are
+    # not new problem objects and the saved rule applicability is unchanged.
+    assert all(row["name"] != "vCLS-4c4c4544-004d-3010" for table in document["appendices"]
+               if table["id"].startswith("problem-") for row in table["rows"])
     assert "P4" not in payload_text

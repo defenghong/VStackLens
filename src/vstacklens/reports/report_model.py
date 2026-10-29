@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from vstacklens.db.repositories import actionable_risk_total
 
@@ -43,7 +43,7 @@ class EnvironmentSummary(BaseModel):
 class HealthScore(BaseModel):
     label: str = "评估受限"
     assessment_limited: bool = True
-    score: float
+    score: float | None
     grade: str
     explanation: str
     breakdown: dict[str, Any] = Field(default_factory=dict)
@@ -63,6 +63,9 @@ class FindingItem(BaseModel):
     risk_level: str
     health_impact: str = "none"
     rule_id: str
+    grade_source_rule_id: str = ""
+    source_rule_ids: list[str] = Field(default_factory=list)
+    source_details: list[dict[str, Any]] = Field(default_factory=list)
     rule_name: str
     title: str
     object_type: str
@@ -122,7 +125,13 @@ class RemediationItem(BaseModel):
 
 
 class ReportData(BaseModel):
+    _customer_problem_view: Any = PrivateAttr(default=None)
+    _customer_caliber_cache: Any = PrivateAttr(default=None)
+    _document_view_cache: Any = PrivateAttr(default=None)
     schema_version: str = "1.0"
+    selected_products: list[str] = Field(default_factory=lambda: ["vcenter"])
+    product_modules: list[dict[str, Any]] = Field(default_factory=list)
+    integration_summary: dict[str, Any] = Field(default_factory=dict)
     report_info: ReportInfo
     customer_info: CustomerInfo
     environment_summary: EnvironmentSummary
@@ -136,6 +145,8 @@ class ReportData(BaseModel):
     problem_categories: list[dict[str, Any]] = Field(default_factory=list)
     report_presentation: dict[str, Any] = Field(default_factory=dict)
     overall_status: str = ""
+    customer_caliber: dict[str, Any] = Field(default_factory=dict)
+    caliber_inputs: dict[str, Any] = Field(default_factory=dict)
     history_visible: bool = False
     asset_inventory: dict[str, Any] = Field(default_factory=dict)
     findings: list[FindingItem] = Field(default_factory=list)
@@ -174,7 +185,7 @@ class ReportDataFactory:
         exception_findings = [FindingItem(**self._finding_payload(item)) for item in context.get("exception_findings", [])]
         remediation_plan = [RemediationItem(**item) for item in context.get("remediation_plan", [])]
         recommendations = self._recommendations(risk, context.get("unavailable_results", []))
-        return ReportData(
+        result = ReportData(
             report_info=ReportInfo(
                 report_id=f"report-{run.get('run_id', '')}",
                 generated_at=run.get("updated_at") or run.get("created_at") or "",
@@ -235,12 +246,26 @@ class ReportDataFactory:
                 "certificate_license_evidence": context.get("certificate_license_evidence", []),
             },
         )
+        result.caliber_inputs = {"object_results": context.get("object_results", []), "findings": [x.model_dump() for x in result.findings]}
+        exception_keys = {(x.rule_id, str(x.evidence.get("object_key") or x.object_name)) for x in result.exception_findings}
+        comparison=context.get('history_comparison') or {}
+        if comparison.get('state')=='ready' and comparison.get('baseline_run_id') and comparison.get('comparison_run_id'):
+            result.appendix['history_comparison']={key:comparison.get(key,'') for key in
+                ('state','baseline_run_id','comparison_run_id','summary_text')}
+        for row in result.caliber_inputs["object_results"]:
+            row["approved_exception"] = (row.get("rule_id"), str(row.get("object_key") or row.get("object_name"))) in exception_keys
+        from vstacklens.reports.customer_caliber import ensure_report
+        ensure_report(result, context)
+        from vstacklens.reports.customer_view import get_customer_problem_view
+        get_customer_problem_view(result, context)
+        return result
 
     def _finding_payload(self, item: dict[str, Any]) -> dict[str, Any]:
         return {
             "risk_level": item.get("risk_level", ""),
             "health_impact": item.get("health_impact", "none"),
             "rule_id": item.get("rule_id", ""),
+            "grade_source_rule_id": item.get("grade_source_rule_id", ""),
             "rule_name": item.get("rule_name", item.get("rule_id", "")),
             "title": item.get("title", item.get("rule_id", "")),
             "object_type": item.get("object_type", ""),

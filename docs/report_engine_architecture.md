@@ -30,7 +30,7 @@ flowchart LR
 - Data files: `data/report_context.json`, `data/inspection_results.json`, `data/findings.json`, `data/assets.json`, `data/rule_catalog.json`, `data/capability_gaps.json`, `data/inspection_result.json`
 - Optional archive: `report-package.zip`
 - Optional delivery document: DOCX through `--docx-out`
-- Not implemented for V1.0: PDF and PPTX
+- Current delivery adds PDF through the dedicated `PdfReportEngine`; no PowerPoint generation implementation or planned export entry is retained. The generic Word/HTML exporter still rejects unsupported formats.
 
 ## ReportData Sections
 

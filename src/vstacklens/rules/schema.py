@@ -30,6 +30,7 @@ class SeverityPolicy(BaseModel):
     type: Literal["fixed", "threshold"] = "fixed"
     default_level: RiskLevel
     rules: list[dict[str, Any]] = Field(default_factory=list)
+    derived_category_levels: dict[str, RiskLevel] = Field(default_factory=dict)
 
 
 class ReportFields(BaseModel):

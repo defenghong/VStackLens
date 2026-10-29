@@ -23,6 +23,11 @@ function esc(value) {
   return String(value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+function joinFields(values, separator = " · ") {
+  return values.filter(value => value !== null && value !== undefined && String(value).trim() !== "")
+    .map(value => String(value).trim()).join(separator);
+}
+
 function table(headers, rows, className = "") {
   const cls = className ? ` class="${esc(className)}"` : "";
   return `<table${cls}><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="${headers.length}">无数据</td></tr>`}</tbody></table>`;
@@ -329,7 +334,7 @@ function historyRiskRows(items, emptyText) {
   return table(["等级", "风险名称", "影响对象", "变化", "当前状态与建议"], items.map(item => `<tr>
     <td class="risk-${esc(item.risk_level)}">${esc(item.risk_level)}</td>
     <td>${esc(item.title)}</td>
-    <td>${esc(item.object_type_label || "")} · ${esc(item.object_name || "")}</td>
+    <td>${esc(joinFields([item.object_type_label, item.object_name]))}</td>
     <td>${esc(item.change_status_label || "")}</td>
     <td>当前状态：${esc(detailText(item.current_observed, "未记录"))}<br>建议：${esc(item.title === "虚拟机存在快照" || /快照/.test(item.title || "") ? "核对快照用途、创建时间和占用空间；仍需保留则登记保留期限并定期复核；无业务需求时在合适窗口删除或合并。" : detailText(item.expected_state, "按健康基线执行"))}</td>
   </tr>`));
@@ -493,7 +498,11 @@ window.addEventListener("hashchange", activateModule);
 activateModule();"""
 
 SINGLE_PAGE_REPORT_JS = r"""
-const DATA = JSON.parse(document.getElementById("report-data").textContent);
+let DATA = JSON.parse(document.getElementById("report-data").textContent);
+let REPORT_SECTION_ROOT = null;
+function reportSection(id) {
+  return REPORT_SECTION_ROOT ? REPORT_SECTION_ROOT.querySelector(`[data-report-section="${id}"]`) : document.getElementById(id);
+}
 
 function esc(value) {
   if (value === null || value === undefined) return "";
@@ -503,27 +512,7 @@ function esc(value) {
 function num(value) {
   if (value === null || value === undefined || value === "") return "";
   const n = Number(value);
-  return Number.isFinite(n) ? n.toLocaleString("zh-CN", {maximumFractionDigits: 1}) : "";
-}
-
-function gb(value) {
-  return value === null || value === undefined ? "" : `${num(value)} GB`;
-}
-
-function pct(value) {
-  if (value === null || value === undefined || value === "") return "";
-  const n = Number(value);
-  return Number.isFinite(n) ? `${n.toFixed(1)}%` : "";
-}
-
-function localTime(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hour12: false,
-  }).format(date);
+  return Number.isFinite(n) ? String(n) : "";
 }
 
 function summarySentence(value) {
@@ -532,48 +521,50 @@ function summarySentence(value) {
 }
 
 function summaryIssueText(item) {
-  let current = String(item.current || "").trim();
-  const clusterNames = (item.objects || []).map(object => object.name).filter(Boolean);
-  if (item.title === "集群 HA 未启用") {
-    current = `${num(clusterNames.length)} 个集群${clusterNames.length ? `（${clusterNames.join("、")}）` : ""}未启用 HA。`;
-  } else if (item.title === "集群 DRS 未启用") {
-    current = `${num(clusterNames.length)} 个集群${clusterNames.length ? `（${clusterNames.join("、")}）` : ""}未启用 DRS。`;
-  }
-  const remediation = String(item.remediation || "").trim().replace(/^建议[：:，,\s]*/, "");
-  return [
-    summarySentence(current),
-    summarySentence(item.impact),
-    summarySentence(remediation ? `建议${remediation}` : "建议完成处理后复核对应状态"),
-  ].filter(Boolean).join(" ");
+  return String(item.summary_text || "");
 }
 
-function table(headers, rows, className = "") {
+function joinFields(values, separator = " · ") {
+  return values.filter(value => value !== null && value !== undefined && String(value).trim() !== "")
+    .map(value => String(value).trim()).join(separator);
+}
+
+function table(headers, rows, className = "", contextTitle = "", columnWeights = []) {
   if (!rows || !rows.length) return "";
   const cls = className ? ` class="${esc(className)}"` : "";
-  return `<div class="table-scroll"><table${cls}><thead><tr>${headers.map(x => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+  const fixed = columnWeights.length === headers.length;
+  const total = fixed ? columnWeights.reduce((sum, value) => sum + value, 0) : 1;
+  const columns = fixed ? `<colgroup>${columnWeights.map(weight => `<col style="width:${(100 * weight / total).toFixed(3)}%">`).join("")}</colgroup>` : "";
+  return `<div class="table-scroll"><table${cls}${fixed ? ' style="table-layout:fixed;font-size:inherit"' : ""}>${columns}<thead>${contextTitle ? `<tr class="table-context"><th colspan="${headers.length}">${esc(joinFields([contextTitle, "对象明细/续表"]))}</th></tr>` : ""}<tr>${headers.map(x => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
 }
 
-function usageBar(value, tone = "storage") {
+function valueTable(headers, rows, className = "") {
+  const present = value => value !== null && value !== undefined && String(value).trim() !== "";
+  const visible = headers.map((_, index) => index).filter(index => rows.some(row => present(row[index])));
+  return visible.length ? table(visible.map(index => headers[index]), rows.map(row => `<tr>${visible.map(index => `<td>${esc(row[index]).replace(/\n/g, "<br>")}</td>`).join("")}</tr>`), className) : "";
+}
+
+function usageBar(value, tone = "storage", displayText = "") {
   if (value === null || value === undefined || value === "") return "";
   const raw = Number(value);
   if (!Number.isFinite(raw)) return "";
   const n = Math.max(0, Math.min(100, raw));
   const level = raw < 75 ? "low" : raw < 80 ? "mid" : "high";
-  return `<div class="usage-track ${esc(tone)} ${level}" role="img" aria-label="使用率 ${pct(raw)}"><span class="used" style="width:${n}%"></span><span class="free" style="width:${100 - n}%"></span></div>`;
+  return `<div class="usage-track ${esc(tone)} ${level}" role="img" aria-label="${esc(joinFields(["使用率", displayText], " "))}"><span class="used" style="width:${n}%"></span><span class="free" style="width:${100 - n}%"></span></div>`;
 }
 
 function storageRows(items) {
   return items.map(item => {
-    const used = item.usagePct === null || item.usagePct === undefined || item.usagePct === "" ? NaN : Number(item.usagePct);
-    const split = Number.isFinite(used) ? `已用 ${pct(used)}；可用 ${pct(100 - used)}` : "";
-    return `<tr><td>${esc(item.name)}</td><td>${esc(item.type)}</td><td>${esc(gb(item.totalGb))}</td><td>${esc(gb(item.usedGb))}</td><td><div class="usage-cell">${usageBar(item.usagePct)}<span>${esc(split)}</span></div></td></tr>`;
+    const split = joinFields([item.usageText ? `已用 ${item.usageText}` : "", item.freeUsageText ? `可用 ${item.freeUsageText}` : ""], "；");
+    return `<tr><td>${esc(item.name || "")}</td><td>${esc(item.type || "")}</td><td>${esc(item.totalText || "")}</td><td>${esc(item.usedText || "")}</td><td><div class="usage-cell">${usageBar(item.usagePct, "storage", item.usageText)}<span>${esc(split)}</span></div></td></tr>`;
   });
 }
 
 function hostRows(items) {
   return items.map(item => {
-    const cpu = Number(item.cpuPct), memory = Number(item.memoryPct);
-    const health = Number.isFinite(cpu) && Number.isFinite(memory) && cpu < 80 && memory < 80 ? "正常" : "需关注";
+    const cpu = item.cpuPct == null || item.cpuPct === "" ? NaN : Number(item.cpuPct), memory = item.memoryPct == null || item.memoryPct === "" ? NaN : Number(item.memoryPct);
+    const reference = DATA.labels?.reference_80 || "";
+    const health = !Number.isFinite(cpu) || !Number.isFinite(memory) ? "" : cpu < 80 && memory < 80 ? `低于${reference}参考线` : `达到${reference}参考线`;
     const state = String(item.connectionState || "").trim().toLowerCase();
     const maintenance = item.maintenanceMode === true || ["true", "1", "yes"].includes(String(item.maintenanceMode || "").toLowerCase());
     const connection = maintenance || ["maintenance", "maintenance_mode", "inmaintenance", "in_maintenance", "维护模式"].includes(state)
@@ -583,12 +574,12 @@ function hostRows(items) {
         : ["notresponding", "not_responding", "disconnected", "unresponsive", "未响应"].includes(state)
           ? "未响应"
           : "—";
-    return `<tr><td>${esc(item.name)}</td><td>${health}</td><td>${connection}</td><td>${esc(pct(item.cpuPct))}</td><td>${esc(pct(item.memoryPct))}</td></tr>`;
+    return `<tr><td>${esc(item.name || "")}</td><td>${health}</td><td>${connection}</td><td>${esc(item.cpuPctText || "")}</td><td>${esc(item.memoryPctText || "")}</td></tr>`;
   });
 }
 
 function vmRows(items) {
-  return items.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(item.hostName)}</td><td>${esc(item.powerState)}</td><td>${esc(gb(item.diskGb))}</td></tr>`);
+  return items.map(item => `<tr><td>${esc(item.name || "")}</td><td>${esc(item.hostName || "")}</td><td>${esc(item.powerState || "")}</td><td>${esc(item.diskText || "")}</td></tr>`);
 }
 
 function renderVsan(item) {
@@ -598,14 +589,14 @@ function renderVsan(item) {
   const disks = (v.disks || []).map(d => `<tr><td>${esc(d.host)}</td><td>${esc(d.group)}</td><td>${esc(d.role)}</td><td>${esc(d.device)}</td><td>${esc(d.diskState)}</td></tr>`);
   const adapters = (v.adapters || []).map(a => `<tr><td>${esc(a.host)}</td><td>${esc(a.device)}</td><td>${esc(a.ip)}</td><td>${esc(a.subnet)}</td><td>${esc(a.label)}</td><td>${esc(a.mtu)}</td></tr>`);
   const capacity = validUsage ? `
-    <div class="vsan-usage">${usageBar(v.usagePct, "vsan-usage-bar")}<div class="usage-values">总计 ${esc(gb(v.totalGb))}　已用 ${esc(gb(v.usedGb))}　可用 ${esc(gb(v.freeGb))}　使用率 ${esc(pct(v.usagePct))}</div></div>
-    <p class="threshold-note">使用率低于 75% 为正常，75% 至低于 80% 为需关注，80% 及以上为高水位。</p>` : "";
+    <div class="vsan-usage">${usageBar(v.usagePct, "vsan-usage-bar", v.usageText)}<div class="usage-values">总计 ${esc(v.totalText || "")}　已用 ${esc(v.usedText || "")}　可用 ${esc(v.freeText || "")}　使用率 ${esc(v.usageText || "")}</div></div>
+    <p class="threshold-note">使用率低于 ${esc(DATA.labels?.reference_75 || "")} 为正常，${esc(DATA.labels?.reference_75 || "")} 至低于 ${esc(DATA.labels?.reference_80 || "")} 为需关注，${esc(DATA.labels?.reference_80 || "")} 及以上为高水位。</p>` : "";
   const capacityFold = capacity ? `<details class="vsan-fold"><summary>vSAN 容量</summary>${capacity}</details>` : "";
   const disksFold = disks.length
-    ? `<details class="vsan-fold"><summary>vSAN 磁盘组（${disks.length}）</summary>${table(["主机", "磁盘组", "磁盘角色", "设备名称", "健康状态"], disks, "vsan-disk-table")}</details>`
+    ? `<details class="vsan-fold"><summary>vSAN 磁盘组 ${num(v.diskGroups)} 个 / 物理盘 ${disks.length} 块</summary>${table(["主机", "磁盘组", "磁盘角色", "设备名称", "健康状态"], disks, "vsan-disk-table")}</details>`
     : "";
   const networkFold = adapters.length
-    ? `<details class="vsan-fold"><summary>vSAN 网络（${adapters.length}）</summary>${table(["主机", "设备", "IP", "子网", "网络标签", "MTU"], adapters, "vsan-vmk-table")}</details>`
+    ? `<details class="vsan-fold"><summary>vSAN VMkernel 配置（${adapters.length}）</summary>${table(["主机", "设备", "IP", "子网", "网络标签", "MTU"], adapters, "vsan-vmk-table")}</details>`
     : "";
   const syncing = v.syncObjects === null || v.syncObjects === undefined || v.syncObjects === "" ? NaN : Number(v.syncObjects);
   const hasSyncData = Number.isFinite(syncing) && (syncing === 0 || (syncing > 0 && v.syncGb !== null && v.syncGb !== undefined));
@@ -614,7 +605,7 @@ function renderVsan(item) {
   if (v.vmdks !== null && v.vmdks !== undefined) objectInfo.push(`VMDK ${esc(num(v.vmdks))}`);
   if (Number.isFinite(syncing) && syncing === 0) objectInfo.push("当前无重同步");
   const resyncDetails = Number.isFinite(syncing) && syncing > 0 && v.syncGb !== null && v.syncGb !== undefined
-    ? `<p class="plain-line">当前有 ${esc(num(syncing))} 个对象正在重同步，待重同步数据 ${esc(gb(v.syncGb))}。</p>`
+    ? `<p class="plain-line">当前有 ${esc(num(syncing))} 个对象正在重同步，待重同步数据 ${esc(v.syncText || "")}。</p>`
     : "";
   const objectsFold = objectInfo.length || hasSyncData
     ? `<details class="vsan-fold"><summary>vSAN 对象</summary>${objectInfo.length ? `<p class="plain-line">${objectInfo.join("；")}。</p>` : ""}${resyncDetails}</details>`
@@ -628,52 +619,50 @@ function renderCluster(cluster) {
     ? `<details class="cluster-storage"><summary>${esc(cluster.name)} 数据存储（${num(stores.length)}）</summary>${table(["名称", "类型", "总容量", "已用容量", "使用率"], storageRows(stores))}</details>`
     : "";
   return `<article class="cluster-block"><h3>${esc(cluster.name)}</h3>
-    ${cluster.hosts.length ? `<h4>主机</h4>${table(["主机名", "健康", "连接", "CPU 使用率", "内存使用率"], hostRows(cluster.hosts))}` : ""}
+    ${cluster.hosts.length ? `<h4>主机</h4>${table(["主机名", "资源使用", "连接", "CPU 使用率", "内存使用率"], hostRows(cluster.hosts))}` : ""}
     ${cluster.vms.length ? `<details><summary>虚拟机（${cluster.vms.length}）</summary>${table(["虚拟机名称", "所在主机", "电源状态", "虚拟磁盘容量"], vmRows(cluster.vms))}</details>` : ""}
     ${storageDetails}${renderVsan(cluster)}</article>`;
 }
 
 function renderSummary() {
   const s = DATA.summary || {};
-  const time = [localTime(s.startedAt), localTime(s.finishedAt)].filter(Boolean).join(" — ");
+  const time = s.timeText || "";
   const problems = (DATA.problems || []).filter(item => !/vsan/i.test(String(item.title || "")));
-  const vcenterLead = problems.length
-    ? "vCenter 环境目前运行正常，但存在以下情况需要处理："
-    : "vCenter 环境目前运行正常，本次未发现需要处理的情况。";
-  const lines = problems.map((item, i) => `<li><span>${i + 1}.</span><span>${esc(summaryIssueText(item))}</span></li>`).join("");
-  const vcenterSummary = `<div class="summary-vcenter"><p class="judgement ${problems.length ? "attention" : "normal"}">${esc(vcenterLead)}</p>${lines ? `<ol class="summary-issues">${lines}</ol>` : ""}</div>`;
+  const overview = s.delivery || {};
+  const facts = DATA.displayFacts || {};
+  const counts = facts.counts || {};
+  const conclusionLabel = DATA.productReport ? "VC／vSAN 原始结论：" : "总体结论：";
+  const conclusion = overview.conclusion || s.judgement || "";
+  const vcenterLead = conclusion ? `${conclusionLabel}${conclusion}。${overview.explanation || ""}` : "";
+  const lines = (overview.priorities || []).map((item, i) => `<li><span>${i + 1}.</span><span>${esc(joinFields([item.level, item.title, item.objects === null || item.objects === undefined ? "" : `${item.objects} 个对象。`]))}${esc(item.suggestion)}</span></li>`).join("");
+  const vcenterSummary = `<div class="summary-vcenter"><p class="judgement ${problems.length || (overview.limitations || []).length ? "attention" : "normal"}">${esc(vcenterLead)}</p>${lines ? `<h3>优先确认事项（前 5 类）</h3><ol class="summary-issues">${lines}</ol><p>完整问题与对象明细见“问题”章节。</p>` : ""}</div>`;
   const vsanCluster = (DATA.environment?.clusters || []).find(cluster => cluster.vsan);
   const vsanSummary = vsanCluster ? renderVsanSummary(vsanCluster) : "";
-  document.getElementById("summary").innerHTML = `<h2>1. 总结</h2><div class="summary-panel"><p class="inspection-time">巡检时间：${esc(time)}</p>${vcenterSummary}${vsanSummary}</div>`;
+  const boundary = s.judgmentBoundary ? `<p class="plain-line">${esc(s.judgmentBoundary)}</p>` : "";
+  const limits = (overview.limitations || []).map(text => `<li>${esc(text)}</li>`).join("");
+  const problemStats = [
+    counts.problem_count === null || counts.problem_count === undefined ? "" : `${counts.problem_label}：${num(counts.problem_count)}`,
+    counts.affected_total === null || counts.affected_total === undefined ? "" : `${counts.affected_label}：${num(counts.affected_total)}`,
+  ];
+  const problemLine = problemStats.some(Boolean) ? `<p>${esc(joinFields(problemStats, "；"))}</p>` : "";
+  const resultLine = s.checkStatistics?.text ? `<p>${esc(s.checkStatistics.text)}</p>` : "";
+  const snapshotLine = facts.snapshots?.overview_label ? `<p class="plain-line">${esc(facts.snapshots.overview_label)}</p>` : "";
+  reportSection("summary").innerHTML = `<h2>1. 总结</h2><div class="summary-panel"><p class="inspection-time">${esc(joinFields([overview.customer, overview.environment, overview.target]))}<br>巡检时间：${esc(time)}</p><p>${esc(overview.scope || "")}</p>${boundary}${problemLine}${resultLine}${snapshotLine}${vcenterSummary}${vsanSummary}${limits ? `<h3>检查限制与下一步</h3><ul class="check-limitations">${limits}</ul>` : ""}</div>`;
 }
 
 function renderVsanSummary(cluster) {
-  const vsan = cluster.vsan || {};
-  const issues = vsan.issues || [];
-  if (issues.length) {
-    const rows = issues.map((item, index) => `<li><span>${index + 1}.</span><span>${esc(summaryIssueText(item))}</span></li>`).join("");
-    return `<div class="summary-vsan"><p class="judgement attention">vSAN 集群目前运行正常，但存在以下情况需要处理：</p><ol class="summary-issues">${rows}</ol></div>`;
+  const v = cluster.vsan || {};
+  if ((v.issues || []).length) {
+    return `<div class="summary-vsan"><p>vSAN 需处理事项：</p><ol>${v.issues.map(issue => `<li>${esc(summaryIssueText(issue))}</li>`).join("")}</ol></div>`;
   }
-  const disks = vsan.disks || [];
-  const normalDisks = disks.filter(disk => String(disk.diskState || "").trim() === "正常").length;
-  const diskStatus = disks.length && normalDisks === disks.length
-    ? `${num(disks.length)} 块磁盘状态正常`
-    : `${num(normalDisks)} / ${num(disks.length)} 块磁盘状态正常`;
-  const hasSyncCount = vsan.syncObjects !== null && vsan.syncObjects !== undefined && vsan.syncObjects !== "";
-  const syncCount = hasSyncCount ? Number(vsan.syncObjects) : NaN;
-  const syncStatus = Number.isFinite(syncCount) && syncCount === 0
-    ? "当前无重同步"
-    : Number.isFinite(syncCount) && syncCount > 0
-      ? `当前有 ${num(syncCount)} 个对象正在重同步`
-      : "重同步状态暂无数据";
-  return `<p class="summary-vsan">vSAN 集群的配置和当前运行状况正常。集群共 ${num(cluster.hosts?.length || 0)} 台主机，${diskStatus}，容量使用率 ${esc(pct(vsan.usagePct))}，${syncStatus}。</p>`;
+  const items = DATA.displayFacts?.vsan?.items || [];
+  return items.length ? `<div class="summary-vsan"><p>vSAN 已核对项目：</p><ul>${items.map(item => `<li>${esc(item.text)}</li>`).join("")}</ul></div>` : "";
 }
 
 function renderEnvironment() {
   const e = DATA.environment || {};
   const identity = (e.identity || []).map(x => {
-    const value = x.label === "巡检时间" ? String(x.value || "").slice(0, 10) : x.value;
-    return `<tr><th>${esc(x.label)}</th><td>${esc(value)}</td></tr>`;
+    return `<tr><th>${esc(x.label)}</th><td>${esc(x.value)}</td></tr>`;
   });
   const scaleItems = e.scale || [];
   const scale = scaleItems.length
@@ -684,49 +673,33 @@ function renderEnvironment() {
   const clusterFacts = clusterRows.length ? `<h3>集群属性</h3>${table(["集群", "类型", "主机数", "HA", "DRS"], clusterRows, "cluster-facts")}` : "";
   const clusters = clusterList.map(renderCluster).join("");
   const certificates = renderCertificates(e.certificates);
-  document.getElementById("environment").innerHTML = `<h2>2. 环境</h2>
+  const network = e.network?.summary ? `<p class="plain-line">${esc(e.network.summary)}</p>` : "";
+  reportSection("environment").innerHTML = `<h2>2. 环境</h2>
     ${identity.length ? `<h3>巡检信息</h3>${table(["项目", "信息"], identity)}` : ""}
     ${certificates}
     ${scale ? `<h3>环境规模</h3>${scale}` : ""}
     ${clusterFacts}
+    ${network}
+    ${e.capacityNote ? `<p class="threshold-note capacity-note">${esc(e.capacityNote)}</p>` : ""}
     ${clusters || ""}`;
 }
 
 function renderCertificates(certificates) {
   if (!certificates) return "";
-  const vcenters = certificates.vcenter || [];
-  const clusters = certificates.clusters || [];
-  const hosts = clusters.flatMap(cluster => cluster.hosts || []);
-  const all = [...vcenters, ...hosts];
-  if (!all.length) return "";
-  const urgent = all.filter(item => item.expired || item.imminent);
-  const countText = `本次检查 ${num(vcenters.length)} 个 vCenter 证书、${num(hosts.length)} 个 ESXi 主机证书`;
-  let conclusion;
-  if (urgent.length) {
-    const named = urgent.map(item => `<span class="certificate-alert-text">${esc(item.name)} 的证书 ${esc(item.expiresOn)} 到期，${item.expired ? "已过期" : "即将过期"}。</span>`).join(" ");
-    conclusion = `<p class="certificate-conclusion">${countText}；${named}</p>`;
-  } else if (all.every(item => item.remainingDays >= 365)) {
-    conclusion = `<p class="certificate-conclusion">${countText}，全部在 1 年以上到期，无即将过期或已过期证书。</p>`;
-  } else {
-    conclusion = `<p class="certificate-conclusion">${countText}，证书均未过期，无 3 个月内到期或已过期证书。</p>`;
-  }
+  const vcenters = certificates.vcenter ? [certificates.vcenter] : [];
+  const hosts = certificates.hosts || [];
+  if (!vcenters.length && !hosts.length) return "";
   const licenseLine = certificates.licenses?.length
     ? `<p class="certificate-license">授权类型：${esc(certificates.licenses.join("；"))}</p>`
     : "";
-  const rows = items => items.map(item => {
-    const rowClass = item.attention ? ` class="certificate-alert"` : "";
-    const remaining = item.expired
-      ? "已过期"
-      : `${item.remainingLabel}${item.imminent ? "（即将过期）" : ""}`;
-    return `<tr${rowClass}><td>${esc(item.name)}</td><td>${esc(item.expiresOn)}</td><td>${esc(remaining)}</td></tr>`;
-  });
+  const rows = items => items.map(item => [item.name,
+    joinFields([item.expiry_date, item.date_source], "\n"),
+    item.days === null || item.days === undefined ? "" : `${num(item.days)} 天`]);
   const vcenterDetails = vcenters.length
-    ? `<details class="certificate-details"><summary>vCenter 证书</summary>${table(["名称", "到期日", "剩余时间"], rows(vcenters), "certificate-table")}</details>`
+    ? `<details class="certificate-details"><summary>vCenter 证书</summary>${valueTable(["名称", "到期日 / 日期来源", "剩余时间"], rows(vcenters), "certificate-table")}</details>`
     : "";
-  const clusterDetails = clusters.filter(cluster => (cluster.hosts || []).length).map(cluster =>
-    `<details class="certificate-details"><summary>${esc(cluster.name)}（${num(cluster.hosts.length)}）</summary>${table(["主机名", "到期日", "剩余时间"], rows(cluster.hosts), "certificate-table")}</details>`
-  ).join("");
-  return `<section class="certificate-block"><h3>证书</h3>${conclusion}${licenseLine}${vcenterDetails}${clusterDetails}</section>`;
+  const hostDetails = hosts.length ? `<details class="certificate-details"><summary>ESXi 主机证书</summary>${valueTable(["主机名", "到期日 / 日期来源", "剩余时间"], rows(hosts), "certificate-table")}</details>` : "";
+  return `<section class="certificate-block"><h3>证书</h3>${licenseLine}${vcenterDetails}${hostDetails}</section>`;
 }
 
 function renderProblems() {
@@ -743,42 +716,135 @@ function renderProblems() {
       }
     }
     const clusterText = involved.size ? [...involved].join("、") : (item.objects || []).some(object => /vCenter/i.test(object.location || "")) ? "vCenter" : "—";
-    return `<tr><td class="problem-risk-${esc(item.level)}">${esc(item.level)}</td><td>${esc(item.title)}</td><td>${esc(num((item.objects || []).length))}</td><td>${esc(clusterText)}</td><td>${esc(summarySentence(item.current))}</td><td>${esc(summarySentence(item.remediation))}</td></tr>`;
+    return `<tr><td class="problem-risk-${esc(item.level)}">${esc(item.level)}</td><td>${esc(item.title)}</td><td>${esc(num((item.objects || []).length))}</td><td>${esc(clusterText)}</td><td>${esc(summarySentence(item.current))}</td><td>见对应问题的处理建议</td></tr>`;
   });
   const groups = ["P1", "P2", "P3"].map(level => {
     const rows = problems.filter(x => x.level === level);
     if (!rows.length) return "";
     return `<details class="problem-level problem-level-${level}"><summary>${level}（${rows.length}）</summary>${rows.map(x => {
-      const objects = (x.objects || []).map(o => `<tr><td>${esc(o.name)}</td><td>${esc(o.location)}</td></tr>`);
+      const objects = (x.objects || []).map(o => `<tr><td>${esc(o.name || "")}（${esc(o.level || "")}）</td><td>${esc(o.location || "")}</td><td>${esc(o.basis || "")}</td></tr>`);
       const objectTable = objects.length > 20
-        ? `<details><summary>受影响对象（${objects.length}）</summary>${table(["名称", "所在主机或集群"], objects)}</details>`
-        : table(["名称", "所在主机或集群"], objects);
-      return `<details class="problem-item"><summary>${esc(x.title)}</summary><div class="problem-block problem-block-${level}"><p><strong>现状：</strong>${esc(x.current)}</p><p><strong>预期：</strong>${esc(x.expected)}</p><p><strong>影响：</strong>${esc(x.impact)}</p><div class="field-block"><strong>受影响对象：</strong>${objectTable}</div><p><strong>处理建议：</strong>${esc(x.remediation)}</p></div></details>`;
+        ? `<details><summary>受影响对象（${objects.length}）</summary>${table([`名称 / ${DATA.labels?.level_label || "等级"}`, "所在主机或集群", x.basis_label || DATA.labels?.basis_label || "判断依据"], objects, "object-evidence-table issue-evidence-table", x.title)}</details>`
+        : table([`名称 / ${DATA.labels?.level_label || "等级"}`, "所在主机或集群", x.basis_label || DATA.labels?.basis_label || "判断依据"], objects, "object-evidence-table issue-evidence-table", x.title);
+      const stepGroups = (x.step_groups || []).length ? x.step_groups : [{title:"", steps:x.steps || []}];
+      const steps = stepGroups.filter(group => (group.steps || []).length).map(group => `${group.title ? `<h4>${esc(group.title)}</h4>` : ""}<ol>${group.steps.map(step => `<li>${esc(step)}</li>`).join("")}</ol>`).join("");
+      return `<details class="problem-item"><summary>${esc(x.title)}</summary><div class="problem-block problem-block-${level}"><p><strong>${esc(x.current_label || DATA.labels?.current_label || "当前值")}：</strong>${esc(x.current)}</p>${x.expected ? `<p><strong>${esc(x.expected_label || DATA.labels?.expected_label || "判定标准")}：</strong>${esc(x.expected)}</p>` : ""}${x.impact ? `<p><strong>影响：</strong>${esc(x.impact)}</p>` : ""}<div class="field-block"><strong>受影响对象：</strong>${objectTable}</div><p><strong>处理建议：</strong>${esc(x.remediation)}</p>${steps}</div></details>`;
     }).join("")}</details>`;
   }).join("");
-  document.getElementById("issues").innerHTML = `<h2>3. 问题</h2>${problems.length ? `${table(["等级", "问题", "数量", "涉及集群", "现状", "建议"], summaryRows, "problem-summary")}${groups}` : `<p class="plain-line">本次未发现需要整改的问题。</p>`}`;
+  reportSection("issues").innerHTML = `<h2>3. 问题</h2>${problems.length ? `${table(["等级", "问题", "数量", "涉及集群", "现状", "建议"], summaryRows, "problem-summary")}${groups}` : `<p class="plain-line">本次未发现需要整改的问题。</p>`}`;
 }
 
 function renderPassed() {
-  const problemTitles = new Set((DATA.problems || []).map(item => String(item.title || "").trim().toLocaleLowerCase("zh-CN")));
-  const labels = [...new Set(DATA.passedChecks || [])].filter(item => !problemTitles.has(String(item || "").trim().toLocaleLowerCase("zh-CN")));
-  const rows = labels.map(x => `<tr><td>${esc(x)}</td><td>正常</td></tr>`);
-  document.getElementById("passed").innerHTML = `<h2>4. 已通过的检查</h2>${rows.length ? table(["检查项", "结果"], rows) : ""}`;
+  const labels = DATA.passedChecks || [];
+  const rows = labels.map(x => `<tr><td>${esc(x)}</td><td>${esc(DATA.passedCheckStatuses?.[x] || "正常")}</td></tr>`);
+  reportSection("passed").innerHTML = `<h2>4. 已通过的检查</h2>${rows.length ? table(["检查项", "结果"], rows) : ""}`;
 }
 
 function renderInventory() {
   const inventory = DATA.inventory || {};
-  const hosts = inventory.hosts || [], vms = inventory.vms || [], stores = inventory.stores || [];
-  const section = (label, list, headers, makeRows) => list.length ? `<details><summary>全部${label}（${list.length}）</summary>${table(headers, makeRows(list))}</details>` : "";
-  document.getElementById("inventory").innerHTML = `<h2>5. 环境清单</h2>
-    ${section("主机", hosts, ["主机名", "健康", "连接", "CPU 使用率", "内存使用率"], hostRows)}
-    ${section("虚拟机", vms, ["虚拟机名称", "所在主机", "电源状态", "虚拟磁盘容量"], vmRows)}
-    ${section("数据存储", stores, ["名称", "类型", "总容量", "已用容量", "使用率"], storageRows)}`;
+  const identity = item => JSON.stringify(Object.fromEntries(Object.entries(item).filter(([key]) => !key.endsWith("Text"))));
+  const representedHosts = new Set((DATA.environment?.clusters || []).flatMap(c => c.hosts || []).map(identity));
+  const representedStores = new Set((DATA.environment?.clusters || []).flatMap(c => c.stores || []).map(identity));
+  const hosts = (inventory.hosts || []).filter(x => !representedHosts.has(identity(x))), vms = inventory.vms || [], stores = (inventory.stores || []).filter(x => !representedStores.has(identity(x)));
+  const section = (label, list, headers, makeRows) => list.length ? `<details><summary>${label}（${list.length}）</summary>${table(headers, makeRows(list), label === "全部虚拟机" ? "object-evidence-table" : "", label)}</details>` : "";
+  reportSection("inventory").innerHTML = `<h2>5. 环境清单</h2>
+    <p>已在“环境”章节列出的主机与数据存储不重复展示；本节保留完整虚拟机清单及未归入集群的资产。</p>
+    ${section("未归入集群的主机", hosts, ["主机名", "资源使用", "连接", "CPU 使用率", "内存使用率"], hostRows)}
+    ${section("全部虚拟机", vms, ["虚拟机名称", "所在主机", "电源状态", "虚拟磁盘容量"], vmRows)}
+    ${section("未归入集群的数据存储", stores, ["名称", "类型", "总容量", "已用容量", "使用率"], storageRows)}`;
 }
 
-renderSummary();
-renderEnvironment();
-renderProblems();
-renderPassed();
-renderInventory();
+function productList(items) {
+  return (items || []).map(item => `<li>${esc(item)}</li>`).join("");
+}
+
+function productTable(headers, rows, contextTitle) {
+  const weights = headers.map(header => header === "证据" ? 1.8
+    : /结论|核查|说明|摘要|用途|窗口/.test(header) ? 3.4
+    : /^(状态|原生级别|设备角色|类别)$/.test(header) ? 1.2 : 2.4);
+  const evidence = headers.indexOf("证据");
+  if (evidence >= 0) {
+    const others = weights.reduce((sum, value, index) => sum + (index === evidence ? 0 : value), 0);
+    weights[evidence] = Math.max(weights[evidence], others * 0.14 / 0.86);
+  }
+  const html = rows.map(row => `<tr>${row.map((value, index) => {
+    const content = headers[index] === "证据"
+      ? String(value).split("、").map(ref => `<span class="product-evidence-id" style="display:inline-block;white-space:nowrap">${esc(ref)}</span>`).join("、<wbr>")
+      : esc(value);
+    return `<td style="white-space:pre-wrap;overflow-wrap:anywhere">${content}</td>`;
+  }).join("")}</tr>`);
+  return table(headers, html, "product-detail-table", contextTitle, weights);
+}
+
+function renderProductSections() {
+  const view = DATA.productReport;
+  if (!view) return;
+  if (!document.getElementById("product-evidence-print-style")) {
+    const style = document.createElement("style");
+    style.id = "product-evidence-print-style";
+    style.textContent = `@media print {
+      .product-detail-table .product-evidence-id {
+        white-space: normal !important;
+        overflow-wrap: anywhere;
+        word-break: break-all;
+        max-width: 100%;
+        box-sizing: border-box;
+      }
+    }`;
+    document.head.appendChild(style);
+  }
+  const targets = productTable(["产品与目标", "执行状态", "检查限制"], (view.targets || []).map(target => [`${joinFields([target.product_name, target.name])}\n${target.address || ""}`, `采集：${target.collection}\n分析：${target.analysis}\n${target.delivery}`, target.limits]), "本次选定目标与检查范围");
+  const overview = `<div class="summary-panel"><h3>本次选定范围 ${esc(view.scope)}</h3><p>${esc(joinFields([view.customer, view.site]))}<br>生成时间：${esc(view.generated_at)}</p><p>${esc(view.summary)}</p><p>各产品分别保留状态与原始结论，不计算跨产品健康分数。</p>${targets}<p>报告章节：${(view.navigation || []).map(esc).join("；")}</p><ul class="check-limitations">${productList(view.limitations)}</ul></div>`;
+  const sections = view.sections.map(module => {
+    const body = module.body;
+    const tables = body.tables.map(item => `<h4>${esc(item.title)}</h4>${productTable(item.columns, item.rows, joinFields([module.product_name, item.title]))}`).join("");
+    const moduleIdentity = joinFields([module.address, module.version === null || module.version === undefined || String(module.version).trim() === "" ? "" : `版本 ${module.version}`, module.build === null || module.build === undefined || String(module.build).trim() === "" ? "" : `Build ${module.build}`]);
+    return `<article><h3>${esc(joinFields([String(module.product_name || "").trim() ? `${module.product_name} 专项` : "", module.name]))}</h3><p>${esc(moduleIdentity)}<br>采集时间说明：${esc(module.time)}；逐来源时间见工程证据。<br>${esc(module.security)}</p><p>${esc(body.conclusion)}</p>${body.empty_business_text ? `<p>${esc(body.empty_business_text)}</p>` : ""}${tables}</article>`;
+  }).join("");
+  const limits = (view.constraints || []).map(item => `<li><strong>${esc(item.title)}</strong>：${esc(item.text)}</li>`).join("");
+  document.getElementById("products").innerHTML = `<h2>产品专项</h2>${sections}<h3>统一检查限制与工程证据</h3><ul>${limits}</ul><p><a href="${esc(view.evidence_filename)}">打开完整工程证据附件</a>（${esc(view.evidence_filename)}）。正文 E 编号对应附件 record_index，完整原始字段、内部标识、取数来源及精确采集时间均在附件保留。</p>`;
+  if (!view.has_vcenter) {
+    reportSection("summary").innerHTML = `<h2>巡检总结</h2>${overview}`;
+  } else {
+    const section = reportSection("summary");
+    const heading = section.querySelector("h2");
+    if (heading) heading.insertAdjacentHTML("afterend", overview);
+    else section.innerHTML = `<h2>综合巡检总结</h2>${overview}`;
+  }
+}
+
+if (DATA.legacyReports) {
+  const integrated = DATA;
+  const holder = document.getElementById("legacy-reports");
+  integrated.legacyReports.forEach(assessment => {
+    const section = document.createElement("article");
+    section.innerHTML = `<h2>VC／vSAN 专项 ${esc(assessment.target)}</h2><p>目标 ID：${esc(assessment.target_id)}</p>` +
+      ["summary", "environment", "issues", "passed", "inventory"].map(id => `<section class="report-section" data-report-section="${id}"></section>`).join("");
+    holder.appendChild(section);
+    REPORT_SECTION_ROOT = section;
+    DATA = assessment.payload;
+    renderSummary(); renderEnvironment(); renderProblems(); renderPassed(); renderInventory();
+  });
+  DATA = integrated;
+  REPORT_SECTION_ROOT = null;
+} else if (!DATA.productReport || DATA.productReport.has_vcenter) {
+  renderSummary();
+  renderEnvironment();
+  renderProblems();
+  renderPassed();
+  renderInventory();
+}
+renderProductSections();
+// Browser printing must include collapsed evidence without changing reading state.
+const printDetailsState = new Map();
+window.addEventListener("beforeprint", () => {
+  document.querySelectorAll("details").forEach(detail => {
+    if (!printDetailsState.has(detail)) printDetailsState.set(detail, detail.open);
+    detail.open = true;
+  });
+});
+window.addEventListener("afterprint", () => {
+  printDetailsState.forEach((open, detail) => { detail.open = open; });
+  printDetailsState.clear();
+});
 """;

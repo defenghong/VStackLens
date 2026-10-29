@@ -348,17 +348,17 @@ def test_artifact_safety_scan_detects_customer_visible_sensitive_terms(tmp_path:
 
     findings = scan_artifacts([report, payload, docx_path, zip_path])
     reasons = "\n".join(item.reason for item in findings)
-    sanitized = sanitize_text("password=secret token=abc Authorization: Bearer aaa C:\\Users\\admin\\project D:\\软件开发\\repo\\src\\vstacklens\\x.py traceback")
+    sanitized = sanitize_text("password=secret token=abc Authorization: Bearer aaa C:\\Users\\admin\\project D:\\ExampleProject\\repo\\src\\vstacklens\\x.py traceback")
 
     assert findings
-    for expected in ("Authorization", "P4", "期望值", "失败", "PDF", "本机源码", "TimeoutError", "本机 Python", "traceback", "凭据"):
+    for expected in ("Authorization", "P4", "期望值", "PDF", "本机源码", "TimeoutError", "本机 Python", "traceback", "凭据"):
         assert expected in reasons
     assert "secret" not in sanitized
     assert "token" not in sanitized
     assert "Authorization" not in sanitized
     assert "Bearer" not in sanitized
     assert "C:\\Users" not in sanitized
-    assert "D:\\软件开发" not in sanitized
+    assert "D:\\ExampleProject" not in sanitized
     assert "src\\vstacklens" not in sanitized
     assert "traceback" not in sanitized
 
@@ -477,7 +477,7 @@ def test_service_runs_vcenter_pipeline_and_reads_report_history(monkeypatch, tmp
     } <= set(progress_messages)
 
 
-def test_certificate_verify_failure_retries_no_verify_once_and_records_warning(monkeypatch, tmp_path: Path) -> None:
+def test_certificate_verify_failure_stops_without_disabling_verification(monkeypatch, tmp_path: Path) -> None:
     ssl_modes: list[bool] = []
 
     class CertificateFallbackCollector:
@@ -490,8 +490,7 @@ def test_certificate_verify_failure_retries_no_verify_once_and_records_warning(m
                 raise ssl.SSLCertVerificationError("certificate verify failed C:\\Users\\admin\\site-packages token=abc")
 
         def collect(self, context, plan, progress=None):
-            assert self.ssl_verify is False
-            return MockCollector(FIXTURE).collect(context, plan)
+            raise AssertionError("collection must not run after certificate verification failed")
 
     monkeypatch.setattr("vstacklens.application.inspection_runner.PyVmomiCollector", CertificateFallbackCollector)
     service = InspectionService(config_path=tmp_path / "desktop_config.json")
@@ -511,11 +510,13 @@ def test_certificate_verify_failure_retries_no_verify_once_and_records_warning(m
     payload = json.loads(payload_text)
     diagnostics_text = (result.report_dir / "engineering_diagnostics.md").read_text(encoding="utf-8")
 
-    assert ssl_modes == [True, False]
+    assert ssl_modes == [True]
     assert result.report_path.exists()
     assert "vCenter 证书未通过可信链校验" not in payload_text
     assert payload["report_context"]["environment_info"]["security_warnings"] == []
-    assert "不校验证书模式下继续" in diagnostics_text
+    assert "不校验证书模式下继续" not in diagnostics_text
+    raw_error = json.loads((result.report_dir / "collection_diagnostics.json").read_text(encoding="utf-8"))[0]
+    assert raw_error["category"] == "certificate_verification_failed"
     for forbidden in ("secret", "token=abc", "C:\\Users", "site-packages", "Traceback"):
         assert forbidden not in diagnostics_text
 
@@ -671,7 +672,7 @@ def test_platform_risk_center_reads_findings(monkeypatch, tmp_path: Path) -> Non
     assert any(item.source_path or item.threshold or item.explanation for item in findings)
 
 
-def test_platform_risk_center_handles_legacy_findings_without_structured_evidence(monkeypatch, tmp_path: Path) -> None:
+def test_platform_risk_center_preserves_frozen_run_evidence_when_database_detail_is_missing(monkeypatch, tmp_path: Path) -> None:
     class FakeCollector:
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -720,10 +721,11 @@ def test_platform_risk_center_handles_legacy_findings_without_structured_evidenc
 
     legacy_item = service.list_platform_findings(config.db_path)[0]
 
-    assert legacy_item.has_structured_evidence is False
-    assert legacy_item.raw_evidence == {}
+    assert legacy_item.has_structured_evidence is True
+    assert legacy_item.raw_evidence
     assert legacy_item.source_path
-    assert legacy_item.explanation == ""
+    assert legacy_item.evidence_summary
+    assert legacy_item.current_observed
 
 
 def test_certificate_license_check_evidence_reads_passed_failed_and_unavailable(monkeypatch, tmp_path: Path) -> None:
@@ -855,8 +857,29 @@ def test_service_connection_failure_still_generates_customer_report(monkeypatch,
     env_info = payload["report_context"]["environment_info"]
 
     assert result.report_path.exists()
-    assert history[0].run_status == "success"
+    assert history[0].run_status == "failed"
     assert history[0].report_path == result.report_path
+    assert result.docx_path and result.docx_path.is_file()
+    assert result.pdf_path is None
+    assert result.pdf_error and "不生成基于空数据的客户 PDF" in result.pdf_error
+    assert not list(result.report_dir.glob("*.pdf"))
+    assert result.state == InspectionState.FAILED
+    assert result.stage == "delivery_failed"
+    assert service.get_progress(config.db_path, result.run_id).state == InspectionState.FAILED
+    diagnostics = json.loads((result.report_dir / "collection_diagnostics.json").read_text(encoding="utf-8"))
+    assert diagnostics[0]["category"] == "timeout"
+    assert "10060" in diagnostics[0]["message"]
+    engineering = (result.report_dir / "engineering_diagnostics.md").read_text(encoding="utf-8")
+    assert "未采集到 vCenter 清单数据" in engineering
+    assert "连接 vCenter 超时" in engineering
+    with connect(config.db_path) as conn:
+        report_states = {row["report_type"]: dict(row) for row in conn.execute(
+            "SELECT report_type, report_status, error_message FROM reports WHERE run_id = ?", (result.run_id,)
+        )}
+    assert report_states["html_package"]["report_status"] == "success"
+    assert report_states["docx"]["report_status"] == "success"
+    assert report_states["pdf"]["report_status"] == "failed"
+    assert "不生成基于空数据" in report_states["pdf"]["error_message"]
     assert env_info == {"security_warnings": []}
     assert "连接 vCenter 超时" not in payload_text
     assert "collection_mode" not in payload_text

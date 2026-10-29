@@ -42,10 +42,23 @@ class EvidenceBuilder:
             "parameters": parameters,
         }
         evidence.update(self._enriched(rule, target, current_value, expected_value, parameters))
+        from vstacklens.reports.rule_provenance import capture_rule
+        evidence["rule_snapshot"] = capture_rule(rule.model_dump(mode="json"), parameters)
         return evidence
 
     def _enriched(self, rule: RuleDefinition, target: CanonicalObject, current_value: Any, expected_value: Any, parameters: dict[str, Any]) -> dict[str, Any]:
         props = {**target.properties, **parameters}
+        if rule.rule_id in {"VSL-VC-006", "VSL-HOST-023"}:
+            from vstacklens.reports.license_evidence import license_summary
+            host = rule.object_type == "HostSystem"
+            prefix = "host_license_" if host else "license_"
+            detail = {k: v for k, v in props.items() if k.startswith(prefix)}
+            summary = license_summary(props, host, target.object_key)
+            return {"evidence_summary_zh": target.object_name + "：" + summary,
+                    "observed_detail": detail, "expected_detail": {"expected_value": expected_value},
+                    "affected_components": [target.object_name],
+                    "recommended_action_zh": rule.report_fields.remediation_zh,
+                    "fault_detail": summary}
         handler = getattr(self, f"_evidence_{rule.rule_id.lower().replace('-', '_')}", None)
         if handler:
             return handler(target, props)
@@ -445,36 +458,11 @@ class EvidenceBuilder:
         }
 
     def _evidence_vsl_host_023(self, target: CanonicalObject, props: dict[str, Any]) -> dict[str, Any]:
-        assigned = props.get("host_license_assigned")
-        evaluation = props.get("host_license_is_evaluation")
-        days = props.get("host_license_expiration_days")
-        expiration_date = props.get("host_license_expiration_date")
-        license_name = props.get("host_license_name") or "未采集"
-        edition = props.get("host_license_edition") or "未采集"
-        state = "未分配 License" if assigned is False else "评估版 License" if evaluation is True else "授权有效"
-        if isinstance(days, (int, float)) and days >= 999999:
-            remaining = "永久授权"
-        elif days is None:
-            remaining = "未采集"
-        else:
-            remaining = f"剩余 {days} 天"
-        return {
-            "evidence_summary_zh": f"主机 {target.object_name} 当前 License 状态为{state}，{remaining}。",
-            "observed_detail": {
-                "host_name": target.object_name,
-                "host_license_assigned": assigned,
-                "host_license_name": license_name,
-                "host_license_edition": edition,
-                "host_license_is_evaluation": evaluation,
-                "host_license_expiration_date": expiration_date,
-                "host_license_expiration_days": days,
-                "host_license_probe_status": props.get("host_license_probe_status"),
-            },
-            "expected_detail": {"expected_policy": "ESXi 主机应分配正式有效 License，且剩余有效期大于 90 天或为永久授权。"},
-            "affected_components": [target.object_name],
-            "recommended_action_zh": "导入并分配正式有效 License，确认授权状态正常后复跑巡检。",
-            "fault_detail": f"主机：{target.object_name}；授权名称：{license_name}；版本：{edition}；状态：{state}；到期：{self._text(expiration_date)}；{remaining}",
-        }
+        from vstacklens.reports.license_evidence import license_summary
+        return {"evidence_summary_zh": target.object_name + "：" + license_summary(props, True, target.object_key),
+                "observed_detail": {k: v for k, v in props.items() if k.startswith("host_license_")},
+                "expected_detail": {"expected_policy": "使用原规则的授权与临期阈值"},
+                "affected_components": [target.object_name]}
 
     def _evidence_vsl_host_013(self, target: CanonicalObject, props: dict[str, Any]) -> dict[str, Any]:
         configured = props.get("host_log_core_dump_configured")
@@ -492,8 +480,14 @@ class EvidenceBuilder:
         count = props.get("pnic_error_count")
         detail = props.get("pnic_error_detail") or []
         threshold = props.get("max_pnic_error_count") or 0
+        if not isinstance(count, (int, float)) or isinstance(count, bool):
+            summary = f"主机 {target.object_name} 未取得错误计数，不能比较建议阈值。"
+        elif count > threshold:
+            summary = f"主机 {target.object_name} 物理网卡错误或丢包计数为 {self._text(count)}，高于建议值 {threshold}。"
+        else:
+            summary = f"主机 {target.object_name} 物理网卡错误或丢包计数为 {self._text(count)}，未高于建议值 {threshold}。"
         return {
-            "evidence_summary_zh": f"主机 {target.object_name} 物理网卡错误或丢包计数为 {self._text(count)}，高于建议值 {threshold}。",
+            "evidence_summary_zh": summary,
             "observed_detail": {"host_name": target.object_name, "pnic_error_count": count, "pnic_error_detail": detail},
             "expected_detail": {"max_pnic_error_count": threshold, "expected_policy": "物理网卡错误和丢包计数应保持为 0 或不持续增长。"},
             "affected_components": [item.get("counter") or target.object_name for item in detail] or [target.object_name],

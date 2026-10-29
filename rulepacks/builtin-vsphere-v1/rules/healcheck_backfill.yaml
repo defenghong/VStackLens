@@ -37,7 +37,7 @@ rules:
   parameters: {}
   condition:
     type: safe_expression
-    not_applicable_when: is_system_vm == True
+    not_applicable_when: is_template == True or (is_system_vm == True)
     fail_when: vm_on_local_datastore == True
     pass_when: vm_on_local_datastore == False
   severity_policy:
@@ -221,6 +221,15 @@ rules:
     type: fixed
     default_level: P3
     rules: []
+    derived_category_levels:
+      VSAN-CLUSTER-HEALTH: P1
+      VSAN-DISK: P1
+      VSAN-OBJECT-HEALTH: P1
+      VSAN-OBJECT-VMDK: P1
+      VSAN-RESYNC: P1
+      VSAN-NETWORK: P1
+      VSAN-CAPACITY: P2
+      VSAN-POLICY: P2
   evidence_schema:
     current_value_path: vsan_issue_count
     expected_value: 0

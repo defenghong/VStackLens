@@ -144,9 +144,9 @@ def _snapshot_support_bundle_zip(path: Path) -> Path:
             f"{vm_dir}/B-longxiagm-133.242.vmx",
             "\n".join(
                 [
-                    'displayName = "B-longxiagm-10.240.7.242"',
+                    'displayName = "B-longxiagm-172.16.133.242"',
                     'scsi0:0.fileName = "B-longxiagm-133.242.vmdk"',
-                    f'scsi0:1.fileName = "/vmfs/volumes/vsan:525731262becee94-187a12b3670f1951/3e6aee69-1a70-96ba-d4e6-3868dd1ad2e0/B-longxiagm-10.240.7.242-000003.vmdk"',
+                    f'scsi0:1.fileName = "/vmfs/volumes/vsan:525731262becee94-187a12b3670f1951/3e6aee69-1a70-96ba-d4e6-3868dd1ad2e0/B-longxiagm-172.16.133.242-000003.vmdk"',
                 ]
             ),
         )
@@ -162,9 +162,9 @@ def _snapshot_support_bundle_zip(path: Path) -> Path:
         )
         descriptors = {
             "B-longxiagm-172.16.133.242.vmdk": ('CID=8521875c', 'parentCID=ffffffff', ""),
-            "B-longxiagm-10.240.7.242-000001.vmdk": ('CID=242aa430', 'parentCID=8521875c', 'parentFileNameHint="B-longxiagm-172.16.133.242.vmdk"'),
-            "B-longxiagm-10.240.7.242-000002.vmdk": ('CID=6bb648ab', 'parentCID=242aa430', 'parentFileNameHint="B-longxiagm-10.240.7.242-000001.vmdk"'),
-            "B-longxiagm-10.240.7.242-000003.vmdk": ('CID=754b316c', 'parentCID=6bb648ab', 'parentFileNameHint="B-longxiagm-10.240.7.242-000002.vmdk"'),
+            "B-longxiagm-172.16.133.242-000001.vmdk": ('CID=242aa430', 'parentCID=8521875c', 'parentFileNameHint="B-longxiagm-172.16.133.242.vmdk"'),
+            "B-longxiagm-172.16.133.242-000002.vmdk": ('CID=6bb648ab', 'parentCID=242aa430', 'parentFileNameHint="B-longxiagm-172.16.133.242-000001.vmdk"'),
+            "B-longxiagm-172.16.133.242-000003.vmdk": ('CID=754b316c', 'parentCID=6bb648ab', 'parentFileNameHint="B-longxiagm-172.16.133.242-000002.vmdk"'),
         }
         for name, lines in descriptors.items():
             _tar_add_text(tar, f"{vsan_dir}/{name}", "\n".join(line for line in lines if line))
@@ -182,8 +182,8 @@ def _migration_network_support_bundle_zip(path: Path) -> Path:
             "vc/var/log/vmware/vpxd/vpxd.log",
             "\n".join(
                 [
-                    "2026-06-02T18:33:10Z info vpxd[1220] Task started: MigrateVM_Task for vm esx-host-01 from esx01 to esx02",
-                    "2026-06-02T18:35:43Z warning vpxd[1220] Relocate completed for esx-host-01, waiting for network backing update on dvPort 318",
+                    "2026-06-02T18:33:10Z info vpxd[1220] Task started: MigrateVM_Task for vm example-vm-01 from esx01 to esx02",
+                    "2026-06-02T18:35:43Z warning vpxd[1220] Relocate completed for example-vm-01, waiting for network backing update on dvPort 318",
                 ]
             ),
         )
@@ -192,10 +192,10 @@ def _migration_network_support_bundle_zip(path: Path) -> Path:
             "esx02/var/run/log/hostd.log",
             "\n".join(
                 [
-                    "2026-06-02T18:36:01Z info hostd[2100] ReconfigureVM_Task esx-host-01 ethernet0 connectable.connected = false",
-                    "2026-06-02T18:36:08Z info hostd[2100] esx-host-01 Vigor transport disconnected during post-migration state transition",
-                    "2026-06-02T18:36:20Z info hostd[2100] esx-host-01 Vigor transport reconnected after vNIC connect refresh",
-                    "2026-06-02T18:36:31Z info hostd[2100] ReconfigureVM_Task esx-host-01 ethernet0 connectable.connected = true",
+                    "2026-06-02T18:36:01Z info hostd[2100] ReconfigureVM_Task example-vm-01 ethernet0 connectable.connected = false",
+                    "2026-06-02T18:36:08Z info hostd[2100] example-vm-01 Vigor transport disconnected during post-migration state transition",
+                    "2026-06-02T18:36:20Z info hostd[2100] example-vm-01 Vigor transport reconnected after vNIC connect refresh",
+                    "2026-06-02T18:36:31Z info hostd[2100] ReconfigureVM_Task example-vm-01 ethernet0 connectable.connected = true",
                 ]
             ),
         )
@@ -211,10 +211,10 @@ def _migration_network_support_bundle_zip(path: Path) -> Path:
         )
         _tar_add_text(
             tar,
-            "esx02/vmfs/volumes/datastore/esx-host-01/esx-host-01.vmx",
+            "esx02/vmfs/volumes/datastore/example-vm-01/example-vm-01.vmx",
             "\n".join(
                 [
-                    'displayName = "esx-host-01"',
+                    'displayName = "example-vm-01"',
                     'ethernet0.virtualDev = "vmxnet3"',
                     'ethernet0.networkName = "PG-App"',
                     'ethernet0.connectable.connected = "TRUE"',
@@ -249,7 +249,7 @@ def _migration_network_support_bundle_zip(path: Path) -> Path:
 def _arp_conflict_support_bundle_zip(path: Path) -> Path:
     conflict_line = (
         "2026-06-14T09:32:12Z cpu12:2097152)WARNING: arp: "
-        "00:50:56:6d:f7:1b is using my IP address 10.240.6.187 on vmk2!"
+        "00:50:56:6d:f7:1b is using my IP address 172.16.103.187 on vmk2!"
     )
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w:gz") as tar:
@@ -266,7 +266,7 @@ def _arp_conflict_support_bundle_zip(path: Path) -> Path:
         _tar_add_text(
             tar,
             "esx-atcdi-node-0115/commands/esxcli_network.txt",
-            "vmk2 10.240.6.187 VLAN 103 uplink vmnic4\n",
+            "vmk2 172.16.103.187 VLAN 103 uplink vmnic4\n",
         )
     tar_buffer.seek(0)
     with zipfile.ZipFile(path, "w") as bundle:
@@ -276,8 +276,8 @@ def _arp_conflict_support_bundle_zip(path: Path) -> Path:
 
 def _arp_conflict_variant_support_bundle_zip(path: Path) -> Path:
     lines = [
-        "2026-06-14T09:32:12Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 10.240.6.187 on vmk2",
-        "2026-06-14T09:32:13Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 10.240.6.187 on vmk2.",
+        "2026-06-14T09:32:12Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 172.16.103.187 on vmk2",
+        "2026-06-14T09:32:13Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 172.16.103.187 on vmk2.",
     ]
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w:gz") as tar:
@@ -342,7 +342,7 @@ def _static_vsan_support_bundle_zip(path: Path) -> Path:
             "\n".join(
                 [
                     "Static VMDK mapping output",
-                    "esx-host-01.vmdk -> naa.6000",
+                    "example-vm-01.vmdk -> naa.6000",
                 ]
             ),
         )
@@ -530,7 +530,7 @@ def _cloud_content(current_judgement: str | None = None, evidence_chain: list[di
         "mode": "diagnosis",
         "can_determine_root_cause": False,
         "current_judgement": current_judgement
-        or "当前日志显示 esx-host-01 在相关时间段存在 MigrateVM_Task / Relocate 迁移记录，hostd 日志中出现 Vigor transport disconnected / reconnected 与 ethernet0 connectable 状态切换，vmkernel 日志中也出现 dvPort 318、PG-App、VLAN 133、uplink vmnic2 dropped packets 相关线索。结合客户描述“在线迁移后网络不通，重连虚拟网卡恢复”，当前更倾向于优先排查迁移后虚拟网卡连接状态刷新、目标主机网络路径、端口组 / DVS 绑定或 Guest OS 网卡状态未及时恢复方向，但当前 support bundle 尚不能单独证明最终根因。",
+        or "当前日志显示 example-vm-01 在相关时间段存在 MigrateVM_Task / Relocate 迁移记录，hostd 日志中出现 Vigor transport disconnected / reconnected 与 ethernet0 connectable 状态切换，vmkernel 日志中也出现 dvPort 318、PG-App、VLAN 133、uplink vmnic2 dropped packets 相关线索。结合客户描述“在线迁移后网络不通，重连虚拟网卡恢复”，当前更倾向于优先排查迁移后虚拟网卡连接状态刷新、目标主机网络路径、端口组 / DVS 绑定或 Guest OS 网卡状态未及时恢复方向，但当前 support bundle 尚不能单独证明最终根因。",
         "likely_causes": ["连接状态刷新异常", "目标侧网络路径或端口绑定需要复核"],
         "evidence_chain": evidence_chain
         if evidence_chain is not None
@@ -539,19 +539,19 @@ def _cloud_content(current_judgement: str | None = None, evidence_chain: list[di
                 "strength": "中",
                 "file": "host-support.tgz!vc/var/log/vmware/vpxd/vpxd.log",
                 "location": "lines 1-2",
-                "message": "2026-06-02T18:33:10Z Task started: MigrateVM_Task for vm esx-host-01 from esx01 to esx02\n2026-06-02T18:35:43Z Relocate completed for esx-host-01, waiting for network backing update on dvPort 318",
+                "message": "2026-06-02T18:33:10Z Task started: MigrateVM_Task for vm example-vm-01 from esx01 to esx02\n2026-06-02T18:35:43Z Relocate completed for example-vm-01, waiting for network backing update on dvPort 318",
                 "relevance": "该证据说明客户问题对象在相关时间段存在迁移和网络 backing 更新线索。",
             },
             {
                 "strength": "强",
                 "file": "host-support.tgz!esx02/var/run/log/hostd.log",
                 "location": "lines 1-4",
-                "message": "2026-06-02T18:36:08Z esx-host-01 Vigor transport disconnected during post-migration state transition\n2026-06-02T18:36:20Z esx-host-01 Vigor transport reconnected after vNIC connect refresh",
+                "message": "2026-06-02T18:36:08Z example-vm-01 Vigor transport disconnected during post-migration state transition\n2026-06-02T18:36:20Z example-vm-01 Vigor transport reconnected after vNIC connect refresh",
                 "relevance": "该证据与客户描述的迁移后网络不通、重连虚拟网卡后恢复现象直接相关。",
             },
         ],
         "evidence_reasoning": ["vCenter 迁移记录、hostd 中 Vigor transport 断开/重连及虚拟网卡连接状态变化可以共同支撑优先排查迁移后虚拟网卡连接状态和目标侧网络路径，但仍缺少故障时 Guest OS 与网络设备侧闭环证据。"],
-        "can_confirm": ["当前日志包能够确认 esx-host-01 存在与客户问题相关的迁移和虚拟网卡/网络状态变化线索。"],
+        "can_confirm": ["当前日志包能够确认 example-vm-01 存在与客户问题相关的迁移和虚拟网卡/网络状态变化线索。"],
         "cannot_confirm": ["当前 support bundle 尚不能单独证明最终根因。"],
         "missing_materials": ["故障发生时间点", "vCenter Task/Event 记录", "现场网络状态截图"],
         "recommended_actions": ["结合故障时间复核任务事件", "核对相关对象的配置和运行状态"],
@@ -568,7 +568,7 @@ def _arp_cloud_content() -> dict:
         "confidence": "中",
         "current_judgement": (
             "当前日志可以确认主机 esx-atcdi-node-0115 的 vmk2 接口反复检测到 IP 地址 "
-            "10.240.6.187 被 MAC 00:50:56:6d:f7:1b 使用，属于 VMkernel 层面的 ARP/IP 冲突告警。"
+            "172.16.103.187 被 MAC 00:50:56:6d:f7:1b 使用，属于 VMkernel 层面的 ARP/IP 冲突告警。"
             "该问题可能导致 vmk2 所在网络通信异常或间歇性不稳定。结合客户网络不通类问题，"
             "当前更倾向于优先排查重复 IP、端口组 / VLAN 或目标网络路径方向；但仅凭当前 support bundle "
             "不能确认冲突 MAC 对应的具体设备身份。"
@@ -580,16 +580,16 @@ def _arp_cloud_content() -> dict:
                 "strength": "强",
                 "file": "vmware-support-hosts.tgz!esx-atcdi-node-0115/var/run/log/vmkernel-172.16.102.187.log",
                 "location": "lines 1-586",
-                "message": "arp: 00:50:56:6d:f7:1b is using my IP address 10.240.6.187 on vmk2!",
-                "relevance": "该日志反复出现 586 次，直接说明 vmk2 检测到自身 IP 10.240.6.187 被 00:50:56:6d:f7:1b 使用。",
+                "message": "arp: 00:50:56:6d:f7:1b is using my IP address 172.16.103.187 on vmk2!",
+                "relevance": "该日志反复出现 586 次，直接说明 vmk2 检测到自身 IP 172.16.103.187 被 00:50:56:6d:f7:1b 使用。",
             }
         ],
         "evidence_reasoning": [
-            "vmkernel 日志中的 ARP/IP 冲突告警属于现场运行日志，不是静态字典或配置清单；vmk2、10.240.6.187 和 00:50:56:6d:f7:1b 与客户网络不通类现象存在直接排查关系。",
+            "vmkernel 日志中的 ARP/IP 冲突告警属于现场运行日志，不是静态字典或配置清单；vmk2、172.16.103.187 和 00:50:56:6d:f7:1b 与客户网络不通类现象存在直接排查关系。",
             "该证据能够证明主机侧检测到重复 IP/ARP 冲突，但不能单独识别冲突 MAC 属于哪台虚拟机、物理服务器或网络设备。",
         ],
         "can_confirm": [
-            "主机 esx-atcdi-node-0115 的 vmk2 接口检测到 10.240.6.187 与 00:50:56:6d:f7:1b 存在 ARP/IP 冲突。",
+            "主机 esx-atcdi-node-0115 的 vmk2 接口检测到 172.16.103.187 与 00:50:56:6d:f7:1b 存在 ARP/IP 冲突。",
             "该告警在当前日志片段中重复出现，具备优先排查价值。",
         ],
         "cannot_confirm": [
@@ -598,13 +598,13 @@ def _arp_cloud_content() -> dict:
         ],
         "missing_materials": [
             "vCenter 中 VMkernel 适配器配置截图",
-            "10.240.6.187 的规划归属",
+            "172.16.103.187 的规划归属",
             "交换机 MAC 地址表 / ARP 表",
             "相关 VLAN / 端口组配置",
             "是否有虚拟机或物理设备配置了相同 IP",
         ],
         "recommended_actions": [
-            "优先核对 10.240.6.187 是否被其他 VMkernel、虚拟机、物理服务器或网络设备重复配置。",
+            "优先核对 172.16.103.187 是否被其他 VMkernel、虚拟机、物理服务器或网络设备重复配置。",
             "结合交换机 MAC 地址表和 vCenter 网络配置定位 00:50:56:6d:f7:1b 的归属。",
         ],
         "evidence_quality": "strong",
@@ -625,7 +625,7 @@ def _patch_cloud_success(monkeypatch: pytest.MonkeyPatch, content: dict | None =
                     {
                         "file": "host-support.tgz!esx02/var/run/log/hostd.log",
                         "component": "hostd",
-                        "keywords": ["esx-host-01", "Vigor transport", "connectable", "disconnected"],
+                        "keywords": ["example-vm-01", "Vigor transport", "connectable", "disconnected"],
                         "context_lines": 20,
                         "reason": "查看迁移后虚拟网卡连接状态和 Vigor transport 状态变化。",
                     },
@@ -904,7 +904,7 @@ def test_snapshot_consolidation_problem_generates_problem_driven_diagnosis(tmp_p
     assert diagnosis["scenario"] == "snapshot_consolidation_failure"
     _assert_rule_only_engine(diagnosis["diagnosis_engine"])
     assert diagnosis["can_fully_determine"] is False
-    assert diagnosis["affected_objects"]["vm_name"] == "B-longxiagm-10.240.7.242"
+    assert diagnosis["affected_objects"]["vm_name"] == "B-longxiagm-172.16.133.242"
     timeline_text = json.dumps(diagnosis.get("timeline", []), ensure_ascii=False)
     _assert_no_model_log_check_report(combined)
     assert "SnapshotVMX_ConsolidateCancel" in timeline_text
@@ -950,7 +950,7 @@ def test_snapshot_vmdk_root_name_boundary_is_preserved(tmp_path: Path) -> None:
 
 def test_problem_driven_diagnosis_for_migration_network_issue(tmp_path: Path) -> None:
     bundle = _migration_network_support_bundle_zip(tmp_path / "vmware-support.zip")
-    problem = "esx-host-01在线迁移后网络不通，重连虚拟网卡又能通"
+    problem = "example-vm-01在线迁移后网络不通，重连虚拟网卡又能通"
     result = LogAnalysisService().run(
         LogAnalysisConfig(
             support_bundle_path=bundle,
@@ -972,11 +972,11 @@ def test_problem_driven_diagnosis_for_migration_network_issue(tmp_path: Path) ->
     assert diagnosis["scenario"] == "vm_migration_network_loss"
     _assert_rule_only_engine(diagnosis["diagnosis_engine"])
     assert diagnosis["confidence"] == "中"
-    assert diagnosis["affected_objects"]["primary_object"] == "esx-host-01"
+    assert diagnosis["affected_objects"]["primary_object"] == "example-vm-01"
     assert {"迁移", "网络", "虚拟网卡"} <= set(diagnosis["affected_objects"]["domains"])
     assert "性能" not in set(diagnosis["affected_objects"]["domains"])
     assert problem in combined
-    assert "esx-host-01" in combined
+    assert "example-vm-01" in combined
     _assert_no_model_log_check_report(combined)
     assert "当前证据指向" not in combined
     assert "故障发生时间点" in combined
@@ -1022,11 +1022,11 @@ def test_problem_driven_diagnosis_recognizes_arp_conflict_variants(tmp_path: Pat
             "path": "/var/run/log/vmkernel.log",
             "archive_path": "vmware-support-hosts.tgz!esx-atcdi-node-0115/var/run/log/vmkernel-172.16.102.187.log",
             "host": "esx-atcdi-node-0115",
-            "host_management_ip": "10.240.5.187",
+            "host_management_ip": "172.16.102.187",
             "text": "\n".join(
                 [
-                    "2026-06-14T09:32:12Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 10.240.6.187 on vmk2",
-                    "2026-06-14T09:32:13Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 10.240.6.187 on vmk2.",
+                    "2026-06-14T09:32:12Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 172.16.103.187 on vmk2",
+                    "2026-06-14T09:32:13Z cpu12:2097152)WARNING: arp: 00:50:56:6d:f7:1b is using my IP address 172.16.103.187 on vmk2.",
                 ]
             ),
         }
@@ -1037,7 +1037,7 @@ def test_problem_driven_diagnosis_recognizes_arp_conflict_variants(tmp_path: Pat
     assert len(candidates) == 1
     assert candidates[0]["type"] == "ARP/IP 冲突"
     assert candidates[0]["vmkernel_interface"] == "vmk2"
-    assert candidates[0]["conflict_ip"] == "10.240.6.187"
+    assert candidates[0]["conflict_ip"] == "172.16.103.187"
     assert candidates[0]["conflict_mac"] == "00:50:56:6d:f7:1b"
     assert candidates[0]["count"] == 2
 
@@ -1090,7 +1090,7 @@ def test_formal_cloud_analysis_passes_config_and_emits_cloud_progress(monkeypatc
     result = LogAnalysisService().run(
         LogAnalysisConfig(
             support_bundle_path=bundle,
-            problem_description="esx-host-01 在线迁移后网络不通，重连虚拟网卡又能通。",
+            problem_description="example-vm-01 在线迁移后网络不通，重连虚拟网卡又能通。",
             db_path=tmp_path / "log-analysis.db",
             report_output_dir=tmp_path / "reports",
             cloud_assist_enabled=True,
@@ -1128,7 +1128,7 @@ def test_cloud_success_generates_model_assisted_diagnosis_report(monkeypatch: py
     result = LogAnalysisService().run(
         LogAnalysisConfig(
             support_bundle_path=bundle,
-            problem_description="esx-host-01 在线迁移后网络不通，重连虚拟网卡又能通。",
+            problem_description="example-vm-01 在线迁移后网络不通，重连虚拟网卡又能通。",
             customer_name="测试客户",
             db_path=tmp_path / "log-analysis.db",
             report_output_dir=tmp_path / "reports",
@@ -1177,7 +1177,7 @@ def test_cloud_success_generates_model_assisted_diagnosis_report(monkeypatch: py
     assert "�" not in combined
     assert api_key not in combined
     assert "sk-secret" not in combined
-    for local_marker in ("D:\\日志", "D:\\LOG", "C:\\Users", "D:\\软件开发", "src\\vstacklens", "site-packages", "sqlite"):
+    for local_marker in ("D:\\日志", "D:\\LOG", "C:\\Users", "D:\\ExampleProject", "src\\vstacklens", "site-packages", "sqlite"):
         assert local_marker.lower() not in combined.lower()
 
     with connect(tmp_path / "log-analysis.db") as conn:
@@ -1192,7 +1192,7 @@ def test_cloud_arp_conflict_candidate_can_drive_model_diagnosis(monkeypatch: pyt
             {
                 "file": "vmware-support-hosts.tgz!esx-atcdi-node-0115/var/run/log/vmkernel-172.16.102.187.log",
                 "component": "vmkernel",
-                "keywords": ["arp", "using my IP address", "vmk2", "10.240.6.187", "00:50:56:6d:f7:1b"],
+                "keywords": ["arp", "using my IP address", "vmk2", "172.16.103.187", "00:50:56:6d:f7:1b"],
                 "context_lines": 20,
                 "reason": "候选强证据显示 vmk2 存在 ARP/IP 冲突，需要提取上下文。",
             }
@@ -1222,20 +1222,20 @@ def test_cloud_arp_conflict_candidate_can_drive_model_diagnosis(monkeypatch: pyt
 
     assert [call["stage"] for call in calls] == ["planning", "diagnosis"]
     assert "vmk2" in calls[0]["prompt"]
-    assert "10.240.6.187" in calls[0]["prompt"]
+    assert "172.16.103.187" in calls[0]["prompt"]
     assert "00:50:56:6d:f7:1b" in calls[0]["prompt"]
     _assert_cloud_engine(diagnosis["diagnosis_engine"])
     assert strong
     assert strong[0]["type"] == "ARP/IP 冲突"
     assert strong[0]["host"] == "esx-atcdi-node-0115"
-    assert strong[0]["host_management_ip"] == "10.240.5.187"
+    assert strong[0]["host_management_ip"] == "172.16.102.187"
     assert strong[0]["vmkernel_interface"] == "vmk2"
-    assert strong[0]["conflict_ip"] == "10.240.6.187"
+    assert strong[0]["conflict_ip"] == "172.16.103.187"
     assert strong[0]["conflict_mac"] == "00:50:56:6d:f7:1b"
     assert strong[0]["count"] == 586
     assert "VStackLens 模型辅助日志诊断报告" in report_text
     assert "vmk2" in combined
-    assert "10.240.6.187" in combined
+    assert "172.16.103.187" in combined
     assert "00:50:56:6d:f7:1b" in combined
     assert "ARP/IP 冲突" in combined
     assert "当前能够确认" in combined
@@ -1283,7 +1283,7 @@ def test_cloud_generic_judgement_downgrade_falls_back_to_rule_report(monkeypatch
     result = LogAnalysisService().run(
         LogAnalysisConfig(
             support_bundle_path=bundle,
-            problem_description="esx-host-01 在线迁移后网络不通，重连虚拟网卡又能通。",
+            problem_description="example-vm-01 在线迁移后网络不通，重连虚拟网卡又能通。",
             db_path=tmp_path / "log-analysis.db",
             report_output_dir=tmp_path / "reports",
             cloud_assist_enabled=True,
@@ -1372,14 +1372,14 @@ def test_cloud_rejected_output_falls_back_to_rule_report_without_leaks(monkeypat
     bundle = _migration_network_support_bundle_zip(tmp_path / "vmware-support.zip")
     api_key = "sk-secret-api-key"
     content = _cloud_content(
-        current_judgement=f"当前日志显示 esx-host-01 存在线索，但模型错误输出了敏感内容 {api_key} 和本机路径 D:\\软件开发\\secret\\trace.py。"
+        current_judgement=f"当前日志显示 example-vm-01 存在线索，但模型错误输出了敏感内容 {api_key} 和本机路径 D:\\ExampleProject\\secret\\trace.py。"
     )
     _patch_cloud_success(monkeypatch, content)
 
     result = LogAnalysisService().run(
         LogAnalysisConfig(
             support_bundle_path=bundle,
-            problem_description="esx-host-01 在线迁移后网络不通，重连虚拟网卡又能通。",
+            problem_description="example-vm-01 在线迁移后网络不通，重连虚拟网卡又能通。",
             db_path=tmp_path / "log-analysis.db",
             report_output_dir=tmp_path / "reports",
             cloud_assist_enabled=True,
@@ -1396,7 +1396,7 @@ def test_cloud_rejected_output_falls_back_to_rule_report_without_leaks(monkeypat
     assert "VStackLens 模型辅助粗排查报告" not in combined
     assert api_key not in combined
     assert "sk-secret" not in combined
-    assert "D:\\软件开发" not in combined
+    assert "D:\\ExampleProject" not in combined
     assert "trace.py" not in combined
 
 
@@ -1814,7 +1814,7 @@ def test_report_center_uses_diagnosis_stats_from_log_payload(tmp_path: Path) -> 
                 "VMware 日志分析报告",
                 "vmware-support.zip",
                 "vmware-support.zip",
-                "esx-host-01 在线迁移后网络不通，重连虚拟网卡又能通。",
+                "example-vm-01 在线迁移后网络不通，重连虚拟网卡又能通。",
                 "success",
                 "success",
                 100,

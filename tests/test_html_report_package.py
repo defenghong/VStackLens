@@ -48,26 +48,31 @@ def test_run_mock_generates_five_chapter_offline_html_package(tmp_path: Path) ->
     compatibility_payload = json.loads(payload_text)
     embedded_payload = _embedded_payload(index)
     public_data_text = json.dumps(embedded_payload, ensure_ascii=False)
-    ids = ("summary", "environment", "issues", "passed", "inventory")
+    ids = ("opening", "overview", "problems", "passed", "environment", "appendices")
     assert [index.find(f'href="#{section}"') for section in ids] == sorted(index.find(f'href="#{section}"') for section in ids)
-    assert all(f'id="{section}" class="report-section"' in index for section in ids)
-    assert all(label in index for label in ("总结", "环境", "问题", "已通过的检查", "环境清单"))
-    for removed in ("总览", "历史对比", "整改跟踪", "Storage Policy 分类", "免责声明"):
+    assert [s['id'] for s in embedded_payload['sections']]==['overview','problems','passed','environment']
+    assert all(label in index for label in ("结论", "环境详情", "问题详情", "已通过的检查", "附录"))
+    for removed in ("历史对比", "整改跟踪", "Storage Policy 分类", "免责声明"):
         assert removed not in index + script + css + public_data_text
     for blocked in ("未确认", "缺字段", "不合规", "collected", "Health", "Capacity", "Network", "Resync", "Storage Policy"):
         assert blocked not in index + script + css + public_data_text
+    # The restored inline SVG ring declares its XML namespace; that URI is
+    # not an external resource. Permit only this exact xmlns attribute.
+    import re
+    dependencies=re.sub(r'xmlns=\\?"http://www\.w3\.org/2000/svg\\?"','xmlns="inline-svg"',index+script+css)
     for external in ("http://", "https://", "//cdn"):
-        assert external not in index + script + css
-    assert embedded_payload["summary"]["judgement"] in {"正常", "需关注"}
-    assert set(embedded_payload["inventory"]) == {"hosts", "vms", "stores"}
+        assert external not in dependencies
+    assert embedded_payload["opening"]["conclusion"] in {"健康", "危险", "关注", "存在整改事项", "评估受限"}
+    assert {'hosts','vms','stores'} <= {a['id'] for a in embedded_payload['appendices']}
     assert "rule_id" not in public_data_text and "result_status" not in public_data_text
-    assert compatibility_payload["report_context"]["report_info"]["report_title"]
+    assert compatibility_payload['document']==embedded_payload and compatibility_payload['title']
 
 
 def test_single_page_problem_summary_uses_full_title_and_existing_copy() -> None:
     assert 'return `<tr><td class="problem-risk-${esc(item.level)}">${esc(item.level)}</td><td>${esc(item.title)}' in SINGLE_PAGE_REPORT_JS
     assert "summarySentence(item.current)" in SINGLE_PAGE_REPORT_JS
-    assert "summarySentence(item.remediation)" in SINGLE_PAGE_REPORT_JS
+    assert "见对应问题的处理建议" in SINGLE_PAGE_REPORT_JS
+    assert "${esc(x.remediation)}" in SINGLE_PAGE_REPORT_JS
     assert HtmlReportPackageBuilder()._clean_customer_text("停止 TSM-SSH 服务") == "停止 SSH 服务"
 
 
@@ -121,7 +126,7 @@ def test_single_page_customer_issues_exclude_vmware_tools_without_mutating_other
         [
             {"rule_id": "VSL-VM-003", "risk_level": "P3", "title": "虚拟机未安装 VMware Tools", "object_type": "VirtualMachine", "object_name": "vm-a"},
             {"rule_id": "VSL-HOST-014", "risk_level": "P3", "title": "ESXi 主机未配置远程 Syslog", "object_type": "HostSystem", "object_name": "esx-a"},
-            {"rule_id": "VSL-CL-002", "risk_level": "P3", "title": "集群 DRS 未启用", "object_type": "ClusterComputeResource", "object_name": "Infra_Org"},
+            {"rule_id": "VSL-CL-003", "risk_level": "P3", "title": "集群 DRS 未启用", "object_type": "ClusterComputeResource", "object_name": "Infra_Org"},
         ],
         {"cluster": [{"name": "Infra_Org", "location": "Datacenter / Infra_Org"}], "vm": [{"name": "vm-a", "cluster": "vSAN", "hostName": "esx-a"}]},
     )
@@ -160,11 +165,24 @@ def test_single_page_summary_narrative_and_issue_level_colors_are_scoped() -> No
     summary_end = SINGLE_PAGE_REPORT_JS.index("function renderVsanSummary", summary_start)
     summary_js = SINGLE_PAGE_REPORT_JS[summary_start:summary_end]
 
-    assert "vCenter 环境目前运行正常，但存在以下情况需要处理：" in summary_js
-    assert "vCenter 环境目前运行正常，本次未发现需要处理的情况。" in summary_js
-    assert "vSAN 集群的配置和当前运行状况正常。" in SINGLE_PAGE_REPORT_JS
-    assert "item.impact" in SINGLE_PAGE_REPORT_JS and "item.remediation" in SINGLE_PAGE_REPORT_JS
-    assert "item.level" not in summary_js and "最高等级" not in summary_js
+    assert "总体结论：" in summary_js
+    assert "overview.conclusion" in summary_js and "overview.limitations" in summary_js
+    assert "vCenter 环境目前运行正常" not in summary_js
+    assert "vSAN 集群的配置和当前运行状况正常。" not in SINGLE_PAGE_REPORT_JS
+    assert "磁盘状态未采集" not in SINGLE_PAGE_REPORT_JS
+    from test_report_b1s_html_20261023 import _javascript_view
+    shared = {"displayFacts":{"vsan":{"items":[{"key":"disks","text":"已核对 12 块物理磁盘，健康异常 0 项"}]}}}
+    summary = _javascript_view(shared, 'elements.summary.innerHTML = renderVsanSummary({vsan:{disks:[{diskState:"正常"}],usagePct:12,syncObjects:0}})')["summary"]["innerHTML"]
+    assert "已核对 12 块物理磁盘，健康异常 0 项" in summary
+    assert all(text not in summary for text in ("1 / 1", "整体正常", "容量使用率", "当前无重同步"))
+    empty = _javascript_view({}, 'elements.summary.innerHTML = renderVsan({vsan:{disks:[],adapters:[]}})')["summary"]["innerHTML"]
+    assert empty == ""  # No disk/capacity/network evidence cannot become a normal or zero row.
+    assert "item.summary_text" in SINGLE_PAGE_REPORT_JS
+    # Customer prose is supplied by the common view, not rewritten in JS.
+    copy_start = SINGLE_PAGE_REPORT_JS.index("function summaryIssueText(")
+    copy_end = SINGLE_PAGE_REPORT_JS.index("function table(", copy_start)
+    assert "item.title ===" not in SINGLE_PAGE_REPORT_JS[copy_start:copy_end]
+    assert "item.level" in summary_js and "最高等级" not in summary_js
     assert 'class="problem-level problem-level-${level}"' in SINGLE_PAGE_REPORT_JS
     assert 'class="problem-block problem-block-${level}"' in SINGLE_PAGE_REPORT_JS
     for tone, color in (("low", "#248453"), ("mid", "#d49a18"), ("high", "#c43c42")):
@@ -196,11 +214,12 @@ def test_single_page_certificate_dates_group_by_cluster_and_flag_three_months() 
     )
 
     assert certificates["vcenter"][0]["expiresOn"] == "2028-05-25"
-    assert certificates["vcenter"][0]["remainingLabel"] == "1 年及以上"
-    assert certificates["clusters"] == [
-        {"name": "Infra_Org", "hosts": [{"name": "esx-a", "cluster": "Infra_Org", "expiresOn": "2031-05-25", "remainingDays": 1704, "remainingLabel": "1 年及以上", "imminent": False, "expired": False, "attention": False}]},
-        {"name": "vSAN", "hosts": [{"name": "esx-b", "cluster": "vSAN", "expiresOn": "2026-12-22", "remainingDays": 89, "remainingLabel": "3 个月", "imminent": True, "expired": False, "attention": True}]},
-    ]
+    assert certificates["vcenter"][0]["remainingLabel"] == "609 天"
+    hosts=[x["hosts"][0] for x in certificates["clusters"]]
+    assert hosts[0]["expiresOn"]=="2031-05-25" and hosts[0]["remainingDays"]==1703 and hosts[0]["remainingLabel"]=="1703 天"
+    assert not hosts[0]["expired"] and not hosts[0]["imminent"]
+    assert hosts[1]["remainingDays"]==89 and hosts[1]["remainingLabel"]=="89 天" and hosts[1]["imminent"]
+    assert hosts[1]["dateDerived"] and hosts[1]["expiresOn"]=="2026-12-22"
     assert "vCenter 永久授权" in certificates["licenses"]
 
 
@@ -237,17 +256,20 @@ def test_single_page_storage_folds_and_five_column_host_view() -> None:
         "maintenanceMode": False,
         "cpuPct": 10.0,
         "memoryPct": 20.0,
+        "cpuPctText": "10.0%",
+        "memoryPctText": "20.0%",
     }
-    assert '"健康", "连接", "CPU 使用率", "内存使用率"' in SINGLE_PAGE_REPORT_JS
-    assert "cpu < 80 && memory < 80 ? \"正常\" : \"需关注\"" in SINGLE_PAGE_REPORT_JS
+    assert '"资源使用", "连接", "CPU 使用率", "内存使用率"' in SINGLE_PAGE_REPORT_JS
+    assert 'cpu < 80 && memory < 80 ? `低于${reference}参考线` : `达到${reference}参考线`' in SINGLE_PAGE_REPORT_JS
     assert 'class="cluster-storage"' in SINGLE_PAGE_REPORT_JS
     assert '${esc(cluster.name)} 数据存储（${num(stores.length)}）</summary>' in SINGLE_PAGE_REPORT_JS
     assert '<summary>vSAN 容量</summary>' in SINGLE_PAGE_REPORT_JS
-    assert 'vSAN 磁盘组（${disks.length}）' in SINGLE_PAGE_REPORT_JS
-    assert 'vSAN 网络（${adapters.length}）' in SINGLE_PAGE_REPORT_JS
+    assert 'vSAN 磁盘组 ${num(v.diskGroups)} 个 / 物理盘 ${disks.length} 块' in SINGLE_PAGE_REPORT_JS
+    assert 'vSAN VMkernel 配置（${adapters.length}）' in SINGLE_PAGE_REPORT_JS
     assert '<summary>vSAN 对象</summary>' in SINGLE_PAGE_REPORT_JS
     assert 'storageContent' not in SINGLE_PAGE_REPORT_JS
-    assert 'section("主机", hosts, ["主机名", "健康", "连接", "CPU 使用率", "内存使用率"], hostRows)' in SINGLE_PAGE_REPORT_JS
+    assert 'section("未归入集群的主机", hosts, ["主机名", "资源使用", "连接", "CPU 使用率", "内存使用率"], hostRows)' in SINGLE_PAGE_REPORT_JS
+    assert 'representedHosts.has(identity(x))' in SINGLE_PAGE_REPORT_JS
 
 
 def _legacy_run_mock_generates_customer_delivery_report_package_and_zip_without_legacy_preview(tmp_path: Path) -> None:
@@ -606,8 +628,8 @@ def test_run_mock_uses_customer_name_argument_in_report_payload(tmp_path: Path) 
 
     payload = json.loads((report_dir / "data" / "customer_report_payload.json").read_text(encoding="utf-8"))
     embedded_payload = _embedded_payload((report_dir / "index.html").read_text(encoding="utf-8"))
-    assert payload["report_context"]["customer_info"]["customer_name"] == "客户 A"
-    assert embedded_payload["report_context"]["customer_info"]["customer_name"] == "客户 A"
+    assert payload['document']['customer'] == "客户 A"
+    assert embedded_payload['customer'] == "客户 A"
 
 
 def test_report_data_factory_maps_legacy_default_customer_placeholder() -> None:
@@ -675,7 +697,7 @@ def _finding(
 
 
 def _embedded_payload(index: str) -> dict:
-    embedded_json = re.search(r'<script id="report-data" type="application/json">(.*?)</script>', index, re.S)
+    embedded_json = re.search(r'<script id="(?:report-data|document-data)" type="application/json">(.*?)</script>', index, re.S)
     assert embedded_json
     return json.loads(embedded_json.group(1))
 
@@ -699,6 +721,26 @@ def test_embedded_json_escapes_script_breakout_payload() -> None:
     assert _embedded_payload(page)["report_context"]["customer_info"]["customer_name"] == payload_text
 
 
+def test_red_alarm_evidence_uses_one_snapshot_without_double_counting() -> None:
+    alarms = [
+        {"entity_name": "esxi-01", "alarm_name": "Host connection", "status": "red"},
+        {"entity_name": "store-01", "alarm_name": "Datastore usage", "status": "red"},
+    ]
+    finding = {
+        "observed_detail": {"active_red_alarms": alarms},
+        "raw_evidence": {"observed_detail": {"active_red_alarms": list(alarms)}},
+    }
+    builder = HtmlReportPackageBuilder()
+    assert builder._red_alarm_entries(finding) == alarms
+    assert "红色活动告警 2 条" in builder._red_alarm_detail(finding)
+    assert "红色活动告警 4 条" not in builder._red_alarm_detail(finding)
+    # A raw-only legacy snapshot remains readable; do not deduplicate genuine
+    # repeated entries inside the original list by matching their display names.
+    repeated = [alarms[0], dict(alarms[0])]
+    legacy = {"raw_evidence": {"observed_detail": {"alarms": repeated}}}
+    assert builder._red_alarm_entries(legacy) == repeated
+
+
 def test_health_html_customer_presentation_filters_and_merges_findings(tmp_path: Path) -> None:
     findings = [
         _finding(
@@ -717,11 +759,12 @@ def test_health_html_customer_presentation_filters_and_merges_findings(tmp_path:
             },
         ),
         _finding("VSL-HOST-014", "ESXi 主机未配置远程 Syslog", "HostSystem", "esxi-01.lab.local", "P3"),
-        _finding("VSL-HOST-015", "ESXi 主机日志与核心转储配置不完整", "HostSystem", "esxi-01.lab.local", "P3"),
-        _finding("VSL-VM-030", "虚拟机 CPU/Memory Limit 过高", "VirtualMachine", "vCLS-4c4c4544-004d-3010", "P3"),
-        _finding("VSL-VM-031", "虚拟机配置了资源 Limit", "VirtualMachine", "app-01", "P3"),
+        # The captured grade is P4; customer visibility must use that grade.
+        _finding("VSL-HOST-015", "ESXi 主机日志与核心转储配置不完整", "HostSystem", "esxi-01.lab.local", "P4"),
+        _finding("VSL-VM-012", "虚拟机 CPU/Memory Limit 过高", "VirtualMachine", "vCLS-4c4c4544-004d-3010", "P4"),
+        _finding("VSL-VM-011", "虚拟机配置了资源 Limit", "VirtualMachine", "app-01", "P3"),
         _finding(
-            "VSL-VM-021",
+            "VSL-VM-001",
             "虚拟机存在超期快照",
             "VirtualMachine",
             "app-02",
@@ -729,16 +772,16 @@ def test_health_html_customer_presentation_filters_and_merges_findings(tmp_path:
             observed_detail={"snapshots": [{"snapshot_name": "before-change", "created_at": "2026-06-01", "size_mb": 1536}]},
         ),
         _finding(
-            "VSL-VM-022",
+            "VSL-VM-007",
             "虚拟机快照链过深",
             "VirtualMachine",
             "app-02",
             "P2",
             observed_detail={"snapshots": [{"snapshot_name": "second-hop", "chain_depth": 3, "size_gb": 2}]},
         ),
-        _finding("VSL-VM-040", "VMware Tools 未运行", "VirtualMachine", "app-03", "P3"),
-        _finding("VSL-VM-041", "VMware Tools 版本过旧", "VirtualMachine", "app-03", "P3"),
-        _finding("VSL-VM-042", "VMware Tools 未安装", "VirtualMachine", "app-03", "P3"),
+        _finding("VSL-VM-002", "VMware Tools 未运行", "VirtualMachine", "app-03", "P3"),
+        _finding("VSL-VM-014", "VMware Tools 版本过旧", "VirtualMachine", "app-03", "P3"),
+        _finding("VSL-VM-003", "VMware Tools 未安装", "VirtualMachine", "app-03", "P3"),
     ]
     report = _minimal_report(
         {
@@ -769,11 +812,11 @@ def test_health_html_customer_presentation_filters_and_merges_findings(tmp_path:
     page_payload = _embedded_payload(index)
 
     for expected in [
-        "当前发现红色活动告警 2 条",
-        "告警对象：esxi-01.lab.local",
-        "告警名称：Host connection",
+        "2 条红色活动告警",
+        "esxi-01.lab.local",
+        "Host connection",
         "虚拟机存在快照",
-        "资源限制",
+        "虚拟机配置了资源限制",
     ]:
         assert expected in visible_text
     assert "VMware Tools" not in visible_text
@@ -785,18 +828,19 @@ def test_health_html_customer_presentation_filters_and_merges_findings(tmp_path:
         "期望值",
         "Limit",
         "日志与核心转储配置不完整",
-        "虚拟机存在超期快照",
-        "虚拟机快照链过深",
+        # Snapshot sub-reasons may remain as evidence, not separate categories.
         "VMware Tools 未运行",
         "VMware Tools 版本过旧",
     ]:
         assert forbidden not in visible_text
 
-    finding_titles = [item["title"] for item in payload["findings"]]
+    problems=next(s for s in page_payload['sections'] if s['kind']=='problems')['items']
+    finding_titles = [item["title"] for item in problems]
     assert finding_titles.count("虚拟机存在快照") == 1
     assert not any("VMware Tools" in title or "Syslog" in title for title in finding_titles)
-    assert any(item["name"] == "vCLS-4c4c4544-004d-3010" for item in page_payload["inventory"]["vms"])
-    assert all(item["name"] != "vCLS-4c4c4544-004d-3010" for problem in page_payload["problems"] for item in problem["objects"])
+    vm_appendix=next(a for a in page_payload['appendices'] if a['id']=='vms')
+    assert any(item["name"] == "vCLS-4c4c4544-004d-3010" for item in vm_appendix['rows'])
+    assert all(item['name']!='vCLS-4c4c4544-004d-3010' for a in page_payload['appendices'] if a['id'].startswith('problem-') for item in a['rows'])
 
 
 def test_invalid_ready_history_comparison_is_rendered_as_empty_state() -> None:
